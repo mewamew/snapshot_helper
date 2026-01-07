@@ -52,7 +52,7 @@ class ScreenshotOverlay(QWidget):
         self.is_drawing = False  # 是否正在涂鸦
 
         # 绘图工具设置
-        self.current_tool = 'pen'  # 'pen', 'rect', 'circle', 'eraser'
+        self.current_tool = 'pen'  # 'pen', 'rect', 'circle', 'arrow', 'eraser'
         self.current_color = QColor(255, 60, 60)  # 红色
         self.current_width = 4  # 笔触粗细（默认中等）
         self.draw_start_pos = None  # 绘制形状的起始位置
@@ -150,6 +150,9 @@ class ScreenshotOverlay(QWidget):
                     # 圆形（椭圆）
                     rect_to_draw = QRect(data[0], data[1])
                     painter.drawEllipse(rect_to_draw)
+                elif shape_type == 'arrow' and len(data) == 2:
+                    # 箭头
+                    self._draw_arrow(painter, data[0], data[1], color, width)
 
             # 绘制当前正在绘制的图形
             if self.is_drawing:
@@ -182,6 +185,10 @@ class ScreenshotOverlay(QWidget):
                         # 圆形预览
                         rect_to_draw = QRect(self.draw_start_pos, self.current_path[-1])
                         painter.drawEllipse(rect_to_draw)
+                    elif self.current_tool == 'arrow' and self.draw_start_pos and len(self.current_path) > 0:
+                        # 箭头预览
+                        self._draw_arrow(painter, self.draw_start_pos, self.current_path[-1],
+                                       self.current_color, self.current_width)
 
             # 绘制选择框边框（蓝色，较细）
             pen = QPen(QColor(0, 120, 215), 2)
@@ -258,6 +265,56 @@ class ScreenshotOverlay(QWidget):
         painter.setPen(QColor(255, 255, 255))
         painter.drawText(bg_rect, Qt.AlignmentFlag.AlignCenter, size_text)
 
+    def _draw_arrow(self, painter, start_point, end_point, color, width):
+        """绘制箭头"""
+        import math
+
+        # 保存 painter 状态
+        painter.save()
+
+        # 设置画笔和画刷
+        pen = QPen(color, width)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(color)
+
+        # 绘制箭头主线
+        painter.drawLine(start_point, end_point)
+
+        # 计算箭头头部
+        dx = end_point.x() - start_point.x()
+        dy = end_point.y() - start_point.y()
+        length = math.sqrt(dx * dx + dy * dy)
+
+        if length > 0:
+            # 箭头头部的大小（根据线条粗细调整）
+            arrow_size = max(10, width * 3)
+
+            # 单位向量
+            ux = dx / length
+            uy = dy / length
+
+            # 箭头头部的两个翼点
+            angle = math.pi / 6  # 30度角
+            wing1_x = end_point.x() - arrow_size * (ux * math.cos(angle) + uy * math.sin(angle))
+            wing1_y = end_point.y() - arrow_size * (uy * math.cos(angle) - ux * math.sin(angle))
+            wing2_x = end_point.x() - arrow_size * (ux * math.cos(angle) - uy * math.sin(angle))
+            wing2_y = end_point.y() - arrow_size * (uy * math.cos(angle) + ux * math.sin(angle))
+
+            # 绘制箭头头部（实心三角形）
+            from PyQt6.QtCore import QPointF
+            from PyQt6.QtGui import QPolygonF
+            arrow_head = QPolygonF([
+                QPointF(end_point.x(), end_point.y()),
+                QPointF(wing1_x, wing1_y),
+                QPointF(wing2_x, wing2_y)
+            ])
+            painter.drawPolygon(arrow_head)
+
+        # 恢复 painter 状态
+        painter.restore()
+
     def _draw_toolbar(self, painter, rect):
         """绘制现代化工具栏（底部居中圆角卡片）"""
         # 工具栏尺寸
@@ -266,8 +323,8 @@ class ScreenshotOverlay(QWidget):
         padding = 12
         separator_width = 8  # 分隔线占用的宽度
 
-        # 计算工具栏总宽度：13个按钮 + 12个间距 + 2个分隔线 + 2个padding
-        toolbar_width = (btn_size * 13) + (spacing * 12) + (separator_width * 2) + (padding * 2)
+        # 计算工具栏总宽度：14个按钮 + 13个间距 + 2个分隔线 + 2个padding
+        toolbar_width = (btn_size * 14) + (spacing * 13) + (separator_width * 2) + (padding * 2)
         toolbar_height = btn_size + padding * 2
 
         # 工具栏位置：底部居中
@@ -313,13 +370,19 @@ class ScreenshotOverlay(QWidget):
         self._draw_tool_button(painter, pen_btn, "✎", self.current_tool == 'pen')
         current_x += btn_size + spacing
 
-        # 4. 橡皮擦工具
+        # 4. 箭头工具
+        arrow_btn = QRect(current_x, toolbar_y + padding, btn_size, btn_size)
+        self.arrow_btn_rect = arrow_btn
+        self._draw_tool_button(painter, arrow_btn, "→", self.current_tool == 'arrow')
+        current_x += btn_size + spacing
+
+        # 5. 橡皮擦工具
         eraser_btn = QRect(current_x, toolbar_y + padding, btn_size, btn_size)
         self.eraser_btn_rect = eraser_btn
         self._draw_tool_button(painter, eraser_btn, "⌫", self.current_tool == 'eraser')
         current_x += btn_size + spacing
 
-        # 5-7. 颜色选择（红、绿、蓝）
+        # 6-8. 颜色选择（红、绿、蓝）
         colors = [QColor(255, 60, 60), QColor(76, 217, 100), QColor(0, 122, 255)]
         self.color_btn_rects = []
         for color in colors:
@@ -331,7 +394,7 @@ class ScreenshotOverlay(QWidget):
             self._draw_color_button(painter, color_btn, color, is_selected)
             current_x += btn_size + spacing
 
-        # 8-10. 笔触粗细
+        # 9-11. 笔触粗细
         widths = [2, 4, 6]
         self.width_btn_rects = []
         for width in widths:
@@ -349,7 +412,7 @@ class ScreenshotOverlay(QWidget):
         )
         current_x += separator_width
 
-        # 11. 撤回按钮
+        # 12. 撤回按钮
         undo_btn = QRect(current_x, toolbar_y + padding, btn_size, btn_size)
         self.undo_btn_rect = undo_btn
         self._draw_edit_button(painter, undo_btn, "↶", len(self.drawing_paths) > 0)
@@ -364,13 +427,13 @@ class ScreenshotOverlay(QWidget):
         )
         current_x += separator_width
 
-        # 12. 取消按钮
+        # 13. 取消按钮
         cancel_btn = QRect(current_x, toolbar_y + padding, btn_size, btn_size)
         self.cancel_btn_rect = cancel_btn
         self._draw_action_button(painter, cancel_btn, "✕", QColor(255, 59, 48))
         current_x += btn_size + spacing
 
-        # 13. 确定按钮
+        # 14. 确定按钮
         confirm_btn = QRect(current_x, toolbar_y + padding, btn_size, btn_size)
         self.confirm_btn_rect = confirm_btn
         self._draw_action_button(painter, confirm_btn, "✓", QColor(52, 199, 89))
@@ -406,8 +469,39 @@ class ScreenshotOverlay(QWidget):
             painter.setPen(QPen(color, pen_width))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(center, icon_size // 2, icon_size // 2)
+        elif text == "→":
+            # 绘制箭头图标
+            import math
+            from PyQt6.QtCore import QPointF
+            from PyQt6.QtGui import QPolygonF
+
+            # 保存当前状态
+            saved_brush = painter.brush()
+
+            painter.setPen(QPen(color, pen_width))
+            painter.setBrush(color)
+
+            # 箭头起点和终点
+            start_x = center.x() - icon_size // 2 + 2
+            end_x = center.x() + icon_size // 2 - 2
+            y = center.y()
+
+            # 绘制箭头主线
+            painter.drawLine(int(start_x), y, int(end_x), y)
+
+            # 绘制箭头头部
+            arrow_size = 8
+            arrow_head = QPolygonF([
+                QPointF(end_x, y),
+                QPointF(end_x - arrow_size, y - arrow_size // 2),
+                QPointF(end_x - arrow_size, y + arrow_size // 2)
+            ])
+            painter.drawPolygon(arrow_head)
+
+            # 恢复画刷设置
+            painter.setBrush(saved_brush)
         else:
-            # 其他图标（画笔）用文字
+            # 其他图标（画笔、橡皮擦等）用文字
             painter.setPen(color)
             font = painter.font()
             font.setPointSize(20)
@@ -527,6 +621,10 @@ class ScreenshotOverlay(QWidget):
                     self.current_tool = 'circle'
                     clicked_button = True
 
+                if hasattr(self, 'arrow_btn_rect') and self.arrow_btn_rect.contains(event.pos()):
+                    self.current_tool = 'arrow'
+                    clicked_button = True
+
                 if hasattr(self, 'eraser_btn_rect') and self.eraser_btn_rect.contains(event.pos()):
                     self.current_tool = 'eraser'
                     clicked_button = True
@@ -622,8 +720,8 @@ class ScreenshotOverlay(QWidget):
                         self.current_width,
                         self.current_path.copy()
                     ))
-                elif self.current_tool in ['rect', 'circle'] and self.draw_start_pos and len(self.current_path) > 0:
-                    # 矩形/圆形：保存起点和终点
+                elif self.current_tool in ['rect', 'circle', 'arrow'] and self.draw_start_pos and len(self.current_path) > 0:
+                    # 矩形/圆形/箭头：保存起点和终点
                     self.drawing_paths.append((
                         self.current_tool,
                         self.current_color,
@@ -706,6 +804,17 @@ class ScreenshotOverlay(QWidget):
                         # 检查是否在椭圆边界附近（允许一定误差）
                         if abs(normalized_dist - 1.0) * max(radius_x, radius_y) <= erase_radius:
                             return True
+            elif shape_type == 'arrow' and len(data) == 2:
+                # 检查箭头线段是否与橡皮擦相交
+                p1 = data[0]
+                p2 = data[1]
+                for eraser_point in eraser_path:
+                    dist = point_to_segment_distance(
+                        eraser_point.x(), eraser_point.y(),
+                        p1.x(), p1.y(), p2.x(), p2.y()
+                    )
+                    if dist <= erase_radius:
+                        return True
             return False
 
         # 过滤掉与橡皮擦相交的路径
@@ -718,6 +827,47 @@ class ScreenshotOverlay(QWidget):
         """按 ESC 取消截图"""
         if event.key() == Qt.Key.Key_Escape:
             self.close()
+
+    def mouseDoubleClickEvent(self, event):
+        """双击鼠标左键确认截图"""
+        if event.button() == Qt.MouseButton.LeftButton and self.edit_mode:
+            # 检查是否点击在工具栏按钮上
+            clicked_on_toolbar = False
+
+            # 检查所有工具栏按钮
+            toolbar_buttons = [
+                'cancel_btn_rect', 'confirm_btn_rect', 'pen_btn_rect',
+                'rect_btn_rect', 'circle_btn_rect', 'arrow_btn_rect',
+                'eraser_btn_rect', 'undo_btn_rect'
+            ]
+
+            for btn_name in toolbar_buttons:
+                if hasattr(self, btn_name):
+                    btn_rect = getattr(self, btn_name)
+                    if btn_rect.contains(event.pos()):
+                        clicked_on_toolbar = True
+                        break
+
+            # 检查颜色和粗细按钮
+            if not clicked_on_toolbar:
+                if hasattr(self, 'color_btn_rects'):
+                    for btn_rect, _ in self.color_btn_rects:
+                        if btn_rect.contains(event.pos()):
+                            clicked_on_toolbar = True
+                            break
+
+                if hasattr(self, 'width_btn_rects') and not clicked_on_toolbar:
+                    for btn_rect, _ in self.width_btn_rects:
+                        if btn_rect.contains(event.pos()):
+                            clicked_on_toolbar = True
+                            break
+
+            # 如果不是点击在工具栏上，则保存截图
+            if not clicked_on_toolbar:
+                rect = self._get_selection_rect()
+                if rect.width() > 5 and rect.height() > 5:
+                    self._save_screenshot(rect)
+                self.close()
 
     def _save_screenshot(self, rect):
         """保存截图到临时目录（包含涂鸦）"""
@@ -795,6 +945,17 @@ class ScreenshotOverlay(QWidget):
                         )
                         rect_to_draw = QRect(p1, p2)
                         painter.drawEllipse(rect_to_draw)
+                    elif shape_type == 'arrow' and len(data) == 2:
+                        # 箭头：绘制箭头
+                        p1 = QPoint(
+                            int((data[0].x() - rect.x()) * self.dpr),
+                            int((data[0].y() - rect.y()) * self.dpr)
+                        )
+                        p2 = QPoint(
+                            int((data[1].x() - rect.x()) * self.dpr),
+                            int((data[1].y() - rect.y()) * self.dpr)
+                        )
+                        self._draw_arrow(painter, p1, p2, color, int(width * self.dpr))
 
                 painter.end()
 
