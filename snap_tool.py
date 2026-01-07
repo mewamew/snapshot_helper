@@ -42,7 +42,7 @@ class ScreenshotOverlay(QWidget):
     def __init__(self, on_capture_done, screen_info):
         super().__init__()
         self.on_capture_done = on_capture_done
-        self.screen_info = screen_info  # (geometry, mss_monitor, device_pixel_ratio)
+        self.screen_info = screen_info  # (geometry, mss_monitor, device_pixel_ratio, screen)
         self.start_pos = None
         self.end_pos = None
         self.is_selecting = False
@@ -57,7 +57,10 @@ class ScreenshotOverlay(QWidget):
         self.current_width = 4  # 笔触粗细（默认中等）
         self.draw_start_pos = None  # 绘制形状的起始位置
 
-        geometry, mss_monitor, dpr = screen_info
+        geometry, mss_monitor, dpr, screen = screen_info
+        self.screen = screen
+        self.screen_geometry = geometry
+        self.window_offset = QPoint(0, 0)
 
         # 设置窗口属性
         self.setWindowFlags(
@@ -71,18 +74,73 @@ class ScreenshotOverlay(QWidget):
         # 设置窗口位置和大小（使用逻辑坐标）
         self.setGeometry(geometry)
 
+        # 保存 DPI 缩放比例（必须在 _capture_screen 之前）
+        self.dpr = dpr
+
+        # 先初始化，避免 _capture_screen 中访问未定义属性
+        self.background_pixmap = None
+
         # 使用 mss 截取当前显示器
         self.background_pixmap = self._capture_screen(mss_monitor)
-        self.dpr = dpr
 
         self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
 
     def _capture_screen(self, monitor):
-        """使用 mss 截取指定显示器"""
+        """截取指定显示器 - macOS 使用 Quartz 获取物理像素，其他平台用 mss"""
+        if sys.platform == 'darwin':
+            return self._capture_screen_macos(monitor)
+        else:
+            return self._capture_screen_mss(monitor)
+
+    def _capture_screen_macos(self, monitor):
+        """macOS: 使用 Quartz 截取物理像素"""
+        try:
+            import Quartz
+            from Quartz import CGWindowListCreateImage, kCGWindowListOptionOnScreenOnly, kCGNullWindowID
+            from Quartz import CGRectMake, kCGWindowImageDefault
+
+            # 使用逻辑坐标创建截图区域
+            region = CGRectMake(monitor['left'], monitor['top'], monitor['width'], monitor['height'])
+
+            # 截取屏幕 - Quartz 会返回物理像素
+            cg_image = CGWindowListCreateImage(region, kCGWindowListOptionOnScreenOnly, kCGNullWindowID, kCGWindowImageDefault)
+
+            if cg_image is None:
+                return self._capture_screen_mss(monitor)
+
+            # 获取图像尺寸（物理像素）
+            width = Quartz.CGImageGetWidth(cg_image)
+            height = Quartz.CGImageGetHeight(cg_image)
+            bytes_per_row = Quartz.CGImageGetBytesPerRow(cg_image)
+
+            # 校准 DPR
+            self._sync_dpr_with_capture(width, height)
+
+            # 转换为 QImage
+            from Quartz import CGImageGetDataProvider, CGDataProviderCopyData
+            data_provider = CGImageGetDataProvider(cg_image)
+            data = CGDataProviderCopyData(data_provider)
+
+            # Quartz 返回 BGRA 格式，使用正确的 bytes_per_row
+            qimg = QImage(data, width, height, bytes_per_row, QImage.Format.Format_ARGB32)
+            pixmap = QPixmap.fromImage(qimg.copy())
+
+            # 设置正确的 DPR，让 Qt 按逻辑坐标绘制
+            pixmap.setDevicePixelRatio(self.dpr)
+            return pixmap
+
+        except ImportError:
+            return self._capture_screen_mss(monitor)
+
+    def _capture_screen_mss(self, monitor):
+        """使用 mss 截取屏幕（fallback）"""
         with mss.mss() as sct:
             screenshot = sct.grab(monitor)
 
-            # mss 返回 BGRA，在小端机器上与 Qt 的 Format_ARGB32 内存布局一致
+            # 根据实际截图尺寸校准 DPR
+            self._sync_dpr_with_capture(screenshot.width, screenshot.height)
+
+            # mss 返回 BGRA
             qimg = QImage(
                 screenshot.bgra,
                 screenshot.width,
@@ -91,21 +149,68 @@ class ScreenshotOverlay(QWidget):
                 QImage.Format.Format_ARGB32
             )
 
-            return QPixmap.fromImage(qimg.copy())
+            pixmap = QPixmap.fromImage(qimg.copy())
+            return pixmap
+
+    def _sync_dpr_with_capture(self, pixel_width, pixel_height):
+        """用实际截图像素尺寸校准逻辑坐标与像素的比例"""
+        logical_width = self.width()
+        logical_height = self.height()
+
+        if logical_width <= 0 or logical_height <= 0:
+            return
+
+        dpr_x = pixel_width / logical_width
+        dpr_y = pixel_height / logical_height
+
+        if dpr_x <= 0 or dpr_y <= 0:
+            return
+
+        effective_dpr = (dpr_x + dpr_y) / 2.0
+        if abs(effective_dpr - self.dpr) > 0.01:
+            self.dpr = effective_dpr
+            if self.background_pixmap:
+                self.background_pixmap.setDevicePixelRatio(self.dpr)
+
+    def _post_show_sync(self):
+        """窗口尺寸稳定后重新校准 DPR（修复 macOS 全屏缩放导致的偏差）"""
+        if not self.background_pixmap:
+            return
+
+        if sys.platform == 'darwin' and self.screen is not None:
+            self.window_offset = self.geometry().topLeft() - self.screen_geometry.topLeft()
+            # DPR 已在 _capture_screen 中通过 _sync_dpr_with_capture 校准
+            self.update()
+            return
+
+        self._sync_dpr_with_capture(
+            self.background_pixmap.width(),
+            self.background_pixmap.height()
+        )
+        self.update()
+
+    def _rect_to_screen_pixels(self, rect):
+        """将窗口内逻辑坐标矩形转换为屏幕像素坐标矩形"""
+        offset = self.window_offset if sys.platform == 'darwin' else QPoint(0, 0)
+        return QRect(
+            int((rect.x() + offset.x()) * self.dpr),
+            int((rect.y() + offset.y()) * self.dpr),
+            int(rect.width() * self.dpr),
+            int(rect.height() * self.dpr)
+        )
 
     def paintEvent(self, event):
         """绘制覆盖层"""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # 绘制背景截图（缩放到窗口大小）
+        # 绘制背景截图（设置了 devicePixelRatio 后 Qt 自动处理缩放）
         if self.background_pixmap:
-            scaled_pixmap = self.background_pixmap.scaled(
-                self.size(),
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            painter.drawPixmap(0, 0, scaled_pixmap)
+            if sys.platform == 'darwin':
+                painter.drawPixmap(-self.window_offset.x(), -self.window_offset.y(),
+                                   self.background_pixmap)
+            else:
+                painter.drawPixmap(0, 0, self.background_pixmap)
 
         # 绘制半透明遮罩
         painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
@@ -117,12 +222,7 @@ class ScreenshotOverlay(QWidget):
             # 清除选择区域的遮罩，显示原始截图
             if self.background_pixmap:
                 # 计算源矩形（考虑 DPI 缩放）
-                src_rect = QRect(
-                    int(rect.x() * self.dpr),
-                    int(rect.y() * self.dpr),
-                    int(rect.width() * self.dpr),
-                    int(rect.height() * self.dpr)
-                )
+                src_rect = self._rect_to_screen_pixels(rect)
                 painter.drawPixmap(rect, self.background_pixmap, src_rect)
 
             # 绘制已完成的图形
@@ -883,12 +983,7 @@ class ScreenshotOverlay(QWidget):
 
         # 从背景截图中裁剪选择区域（使用物理像素坐标）
         if self.background_pixmap:
-            src_rect = QRect(
-                int(rect.x() * self.dpr),
-                int(rect.y() * self.dpr),
-                int(rect.width() * self.dpr),
-                int(rect.height() * self.dpr)
-            )
+            src_rect = self._rect_to_screen_pixels(rect)
             cropped = self.background_pixmap.copy(src_rect)
 
             # 如果有涂鸦，将涂鸦绘制到截图上
@@ -982,6 +1077,13 @@ class ScreenshotOverlay(QWidget):
         super().showEvent(event)
         self.activateWindow()
         self.raise_()
+        QTimer.singleShot(0, self._post_show_sync)
+
+    def resizeEvent(self, event):
+        """窗口尺寸变化时校准 DPR（macOS 全屏切换会触发）"""
+        super().resizeEvent(event)
+        if sys.platform == 'darwin' and self.background_pixmap:
+            QTimer.singleShot(0, self._post_show_sync)
 
 
 class SnapTool(QApplication):
@@ -991,6 +1093,14 @@ class SnapTool(QApplication):
         super().__init__(argv)
 
         self.setQuitOnLastWindowClosed(False)
+
+        # macOS: 隐藏 Dock 图标，只显示托盘图标
+        if sys.platform == 'darwin':
+            try:
+                from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+                NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+            except ImportError:
+                pass
 
         # 创建热键信号
         self.hotkey_signal = HotkeySignal()
@@ -1009,15 +1119,57 @@ class SnapTool(QApplication):
         """设置系统托盘图标"""
         self.tray_icon = QSystemTrayIcon(self)
 
-        # 创建简单的图标 (蓝色方块)
-        pixmap = QPixmap(32, 32)
-        pixmap.fill(QColor(0, 174, 255))
+        # 创建截图工具图标
+        icon_size = 22 if sys.platform == 'darwin' else 32
+        pixmap = QPixmap(icon_size, icon_size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # 绘制相机/截图图标
+        margin = 2
+        rect_size = icon_size - margin * 2
+
+        # 背景圆角矩形
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 122, 255))  # iOS 蓝色
+        painter.drawRoundedRect(margin, margin, rect_size, rect_size, 4, 4)
+
+        # 绘制剪刀/裁剪图标
+        painter.setPen(QPen(QColor(255, 255, 255), 2))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        # 内部矩形框（表示截图区域）
+        inner_margin = 5
+        inner_size = icon_size - inner_margin * 2
+        painter.drawRect(inner_margin, inner_margin, inner_size, inner_size)
+
+        # 四个角的标记
+        corner_len = 4
+        # 左上角
+        painter.drawLine(inner_margin, inner_margin, inner_margin + corner_len, inner_margin)
+        painter.drawLine(inner_margin, inner_margin, inner_margin, inner_margin + corner_len)
+        # 右上角
+        painter.drawLine(inner_margin + inner_size, inner_margin, inner_margin + inner_size - corner_len, inner_margin)
+        painter.drawLine(inner_margin + inner_size, inner_margin, inner_margin + inner_size, inner_margin + corner_len)
+        # 左下角
+        painter.drawLine(inner_margin, inner_margin + inner_size, inner_margin + corner_len, inner_margin + inner_size)
+        painter.drawLine(inner_margin, inner_margin + inner_size, inner_margin, inner_margin + inner_size - corner_len)
+        # 右下角
+        painter.drawLine(inner_margin + inner_size, inner_margin + inner_size, inner_margin + inner_size - corner_len, inner_margin + inner_size)
+        painter.drawLine(inner_margin + inner_size, inner_margin + inner_size, inner_margin + inner_size, inner_margin + inner_size - corner_len)
+
+        painter.end()
         self.tray_icon.setIcon(QIcon(pixmap))
+
+        # 根据平台显示不同热键
+        hotkey_text = "Ctrl+A" if sys.platform == 'darwin' else "Shift+Alt+B"
 
         # 创建托盘菜单
         menu = QMenu()
 
-        screenshot_action = QAction("截图 (Shift+Alt+B)", self)
+        screenshot_action = QAction(f"截图 ({hotkey_text})", self)
         screenshot_action.triggered.connect(self._start_screenshot)
         menu.addAction(screenshot_action)
 
@@ -1028,45 +1180,60 @@ class SnapTool(QApplication):
         menu.addAction(quit_action)
 
         self.tray_icon.setContextMenu(menu)
-        self.tray_icon.setToolTip("截屏工具 - Shift+Alt+B")
+        self.tray_icon.setToolTip(f"截屏工具 - {hotkey_text}")
         self.tray_icon.show()
 
         # 显示启动提示
         self.tray_icon.showMessage(
             "截屏工具已启动",
-            "按 Shift+Alt+B 开始截图",
+            f"按 {hotkey_text} 开始截图",
             QSystemTrayIcon.MessageIcon.Information,
             2000
         )
 
     def _setup_hotkey(self):
-        """设置全局热键 Shift+Alt+B"""
+        """设置全局热键 - Mac: Ctrl+A, Windows: Shift+Alt+B"""
         self.current_keys = set()
 
         def on_press(key):
             self.current_keys.add(key)
 
-            # 检查是否按下了 Shift+Alt+B
-            shift_pressed = (
-                keyboard.Key.shift in self.current_keys or
-                keyboard.Key.shift_l in self.current_keys or
-                keyboard.Key.shift_r in self.current_keys
-            )
-            alt_pressed = (
-                keyboard.Key.alt in self.current_keys or
-                keyboard.Key.alt_l in self.current_keys or
-                keyboard.Key.alt_r in self.current_keys or
-                keyboard.Key.alt_gr in self.current_keys
-            )
+            if sys.platform == 'darwin':
+                # Mac: Ctrl+A
+                ctrl_pressed = (
+                    keyboard.Key.ctrl in self.current_keys or
+                    keyboard.Key.ctrl_l in self.current_keys or
+                    keyboard.Key.ctrl_r in self.current_keys
+                )
+                try:
+                    a_pressed = hasattr(key, 'char') and key.char and key.char.lower() == 'a'
+                except AttributeError:
+                    a_pressed = False
 
-            try:
-                b_pressed = hasattr(key, 'char') and key.char and key.char.lower() == 'b'
-            except AttributeError:
-                b_pressed = False
+                if ctrl_pressed and a_pressed:
+                    self.hotkey_signal.triggered.emit()
+                    self.current_keys.clear()
+            else:
+                # Windows: Shift+Alt+B
+                shift_pressed = (
+                    keyboard.Key.shift in self.current_keys or
+                    keyboard.Key.shift_l in self.current_keys or
+                    keyboard.Key.shift_r in self.current_keys
+                )
+                alt_pressed = (
+                    keyboard.Key.alt in self.current_keys or
+                    keyboard.Key.alt_l in self.current_keys or
+                    keyboard.Key.alt_r in self.current_keys or
+                    keyboard.Key.alt_gr in self.current_keys
+                )
+                try:
+                    b_pressed = hasattr(key, 'char') and key.char and key.char.lower() == 'b'
+                except AttributeError:
+                    b_pressed = False
 
-            if shift_pressed and alt_pressed and b_pressed:
-                self.hotkey_signal.triggered.emit()
-                self.current_keys.clear()
+                if shift_pressed and alt_pressed and b_pressed:
+                    self.hotkey_signal.triggered.emit()
+                    self.current_keys.clear()
 
         def on_release(key):
             self.current_keys.discard(key)
@@ -1079,14 +1246,24 @@ class SnapTool(QApplication):
 
     def _on_hotkey_triggered(self):
         """热键触发时启动截图"""
+        # macOS: 先激活应用，确保事件循环正常工作
+        if sys.platform == 'darwin':
+            try:
+                from AppKit import NSApplication
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            except ImportError:
+                pass
         # 使用 QTimer 确保在主线程执行
-        QTimer.singleShot(50, self._start_screenshot)
+        QTimer.singleShot(0, self._start_screenshot)
+        # 强制处理事件
+        self.processEvents()
 
     def _get_current_screen_info(self):
         """获取鼠标所在屏幕的信息"""
         cursor_pos = QCursor.pos()
 
-        # 使用 mss 获取显示器信息（物理像素坐标）
+        # 使用 mss 获取显示器信息
+        # 注意：Mac 上 mss.monitors 返回逻辑像素坐标，Windows 上返回物理像素坐标
         with mss.mss() as sct:
             # monitors[0] 是所有显示器的组合，monitors[1:] 是各个显示器
             monitors = sct.monitors[1:]
@@ -1106,11 +1283,11 @@ class SnapTool(QApplication):
         geometry = current_screen.geometry()
         dpr = current_screen.devicePixelRatio()
 
-        # Qt geometry 的 x/y 是物理像素，width/height 是逻辑像素
+        # Qt geometry 使用逻辑像素
         screen_left = geometry.x()
         screen_top = geometry.y()
-        screen_phys_width = int(geometry.width() * dpr)
-        screen_phys_height = int(geometry.height() * dpr)
+        screen_width = geometry.width()
+        screen_height = geometry.height()
 
         # 在 mss monitors 中找到匹配的显示器（通过位置匹配）
         mss_monitor = None
@@ -1120,32 +1297,45 @@ class SnapTool(QApplication):
                 mss_monitor = mon
                 break
 
-        # 如果位置匹配失败，尝试尺寸匹配
+        # 如果位置匹配失败，尝试尺寸匹配（使用逻辑像素，Mac 上 mss 返回逻辑像素）
         if mss_monitor is None:
             for mon in monitors:
-                if mon["width"] == screen_phys_width and mon["height"] == screen_phys_height:
+                if mon["width"] == screen_width and mon["height"] == screen_height:
                     mss_monitor = mon
                     break
 
-        # 最后兜底
+        # 最后兜底：使用逻辑像素坐标
         if mss_monitor is None:
             mss_monitor = {
                 "left": screen_left,
                 "top": screen_top,
-                "width": screen_phys_width,
-                "height": screen_phys_height
+                "width": screen_width,
+                "height": screen_height
             }
 
-        return (geometry, mss_monitor, dpr)
+        return (geometry, mss_monitor, dpr, current_screen)
 
     def _start_screenshot(self):
         """开始截图"""
         if self.overlay and self.overlay.isVisible():
             return
 
+        # macOS: 强制激活应用到前台，确保窗口能正确显示
+        if sys.platform == 'darwin':
+            try:
+                from AppKit import NSApplication
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            except ImportError:
+                pass
+
         screen_info = self._get_current_screen_info()
         self.overlay = ScreenshotOverlay(self._on_capture_done, screen_info)
-        self.overlay.showFullScreen()
+        if sys.platform == 'darwin':
+            self.overlay.show()
+            self.overlay.raise_()
+            self.overlay.activateWindow()
+        else:
+            self.overlay.showFullScreen()
 
     def _on_capture_done(self, filepath):
         """截图完成回调"""
