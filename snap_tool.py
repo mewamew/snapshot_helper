@@ -150,6 +150,8 @@ class ScreenshotOverlay(QWidget):
             )
 
             pixmap = QPixmap.fromImage(qimg.copy())
+            # 设置 DPR，让 Qt 按逻辑坐标绘制（与 macOS Quartz 行为一致）
+            pixmap.setDevicePixelRatio(self.dpr)
             return pixmap
 
     def _sync_dpr_with_capture(self, pixel_width, pixel_height):
@@ -987,18 +989,20 @@ class ScreenshotOverlay(QWidget):
             cropped = self.background_pixmap.copy(src_rect)
 
             # 如果有涂鸦，将涂鸦绘制到截图上
+            # 注意：cropped 继承了 background_pixmap 的 devicePixelRatio
+            # Qt painter 会自动处理 DPR 缩放，所以使用逻辑坐标即可
             if self.drawing_paths:
                 painter = QPainter(cropped)
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-                # 计算涂鸦相对于选择区域的坐标，并缩放到物理像素
+                # 计算涂鸦相对于选择区域的逻辑坐标
                 for item in self.drawing_paths:
                     shape_type = item[0]
                     color = item[1]
                     width = item[2]
                     data = item[3]
 
-                    pen = QPen(color, int(width * self.dpr))
+                    pen = QPen(color, width)
                     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
                     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
                     painter.setPen(pen)
@@ -1008,49 +1012,49 @@ class ScreenshotOverlay(QWidget):
                         # 画笔：绘制所有点连接的线
                         for i in range(len(data) - 1):
                             p1 = QPoint(
-                                int((data[i].x() - rect.x()) * self.dpr),
-                                int((data[i].y() - rect.y()) * self.dpr)
+                                data[i].x() - rect.x(),
+                                data[i].y() - rect.y()
                             )
                             p2 = QPoint(
-                                int((data[i + 1].x() - rect.x()) * self.dpr),
-                                int((data[i + 1].y() - rect.y()) * self.dpr)
+                                data[i + 1].x() - rect.x(),
+                                data[i + 1].y() - rect.y()
                             )
                             painter.drawLine(p1, p2)
                     elif shape_type == 'rect' and len(data) == 2:
                         # 矩形：绘制矩形
                         p1 = QPoint(
-                            int((data[0].x() - rect.x()) * self.dpr),
-                            int((data[0].y() - rect.y()) * self.dpr)
+                            data[0].x() - rect.x(),
+                            data[0].y() - rect.y()
                         )
                         p2 = QPoint(
-                            int((data[1].x() - rect.x()) * self.dpr),
-                            int((data[1].y() - rect.y()) * self.dpr)
+                            data[1].x() - rect.x(),
+                            data[1].y() - rect.y()
                         )
                         rect_to_draw = QRect(p1, p2)
                         painter.drawRect(rect_to_draw)
                     elif shape_type == 'circle' and len(data) == 2:
                         # 圆形：绘制椭圆
                         p1 = QPoint(
-                            int((data[0].x() - rect.x()) * self.dpr),
-                            int((data[0].y() - rect.y()) * self.dpr)
+                            data[0].x() - rect.x(),
+                            data[0].y() - rect.y()
                         )
                         p2 = QPoint(
-                            int((data[1].x() - rect.x()) * self.dpr),
-                            int((data[1].y() - rect.y()) * self.dpr)
+                            data[1].x() - rect.x(),
+                            data[1].y() - rect.y()
                         )
                         rect_to_draw = QRect(p1, p2)
                         painter.drawEllipse(rect_to_draw)
                     elif shape_type == 'arrow' and len(data) == 2:
                         # 箭头：绘制箭头
                         p1 = QPoint(
-                            int((data[0].x() - rect.x()) * self.dpr),
-                            int((data[0].y() - rect.y()) * self.dpr)
+                            data[0].x() - rect.x(),
+                            data[0].y() - rect.y()
                         )
                         p2 = QPoint(
-                            int((data[1].x() - rect.x()) * self.dpr),
-                            int((data[1].y() - rect.y()) * self.dpr)
+                            data[1].x() - rect.x(),
+                            data[1].y() - rect.y()
                         )
-                        self._draw_arrow(painter, p1, p2, color, int(width * self.dpr))
+                        self._draw_arrow(painter, p1, p2, color, width)
 
                 painter.end()
 
