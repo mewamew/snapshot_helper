@@ -6,10 +6,11 @@
     <string>com.snaptool</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
-        <string>-c</string>
-        <string>cd __INSTALL_PATH__ &amp;&amp; source venv/bin/activate &amp;&amp; python snap_tool.py</string>
+        <string>__INSTALL_PATH__/venv/bin/python</string>
+        <string>__INSTALL_PATH__/snap_tool.py</string>
     </array>
+    <key>WorkingDirectory</key>
+    <string>__INSTALL_PATH__</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
