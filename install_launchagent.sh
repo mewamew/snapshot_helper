@@ -25,11 +25,48 @@ sed "s|__INSTALL_PATH__|$SCRIPT_DIR|g" "$SCRIPT_DIR/$PLIST_NAME" > "$LAUNCH_AGEN
 launchctl load "$LAUNCH_AGENTS_DIR/$PLIST_NAME"
 
 echo ""
+echo "=========================================="
 echo "安装完成！"
-echo "SnapTool 将在下次登录时自动启动。"
+echo "=========================================="
 echo ""
+
+# 检测 Python 路径并提示授权
+PYTHON_PATH="$SCRIPT_DIR/venv/bin/python"
+if [ -L "$PYTHON_PATH" ]; then
+    # 追踪符号链接找到真实路径
+    REAL_PYTHON=$(readlink -f "$PYTHON_PATH")
+    FRAMEWORK_DIR=$(dirname "$(dirname "$REAL_PYTHON")")
+    PYTHON_BIN="$FRAMEWORK_DIR/bin/python3"
+    PYTHON_APP="$FRAMEWORK_DIR/Resources/Python.app"
+
+    echo "⚠️  首次使用需要授予 macOS 权限才能正常工作！"
+    echo ""
+    echo "请打开「系统设置 → 隐私与安全性」，在以下两项中添加："
+    echo ""
+    echo "📌 辅助功能 (Accessibility)："
+    if [ -f "$PYTHON_BIN" ]; then
+        echo "   $PYTHON_BIN"
+    fi
+    if [ -d "$PYTHON_APP" ]; then
+        echo "   $PYTHON_APP"
+    fi
+    echo ""
+    echo "📌 屏幕录制 (Screen Recording)："
+    if [ -f "$PYTHON_BIN" ]; then
+        echo "   $PYTHON_BIN"
+    fi
+    if [ -d "$PYTHON_APP" ]; then
+        echo "   $PYTHON_APP"
+    fi
+    echo ""
+    echo "提示：添加时按 Cmd+Shift+G 可以粘贴路径"
+    echo ""
+fi
+
+echo "=========================================="
 echo "其他命令："
+echo "  重启服务: launchctl unload ~/Library/LaunchAgents/$PLIST_NAME && launchctl load ~/Library/LaunchAgents/$PLIST_NAME"
 echo "  卸载: launchctl unload ~/Library/LaunchAgents/$PLIST_NAME && rm ~/Library/LaunchAgents/$PLIST_NAME"
-echo "  立即启动: launchctl start com.snaptool"
 echo "  查看日志: cat /tmp/snaptool.log"
 echo "  查看错误: cat /tmp/snaptool.err"
+echo "=========================================="
