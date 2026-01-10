@@ -1196,48 +1196,87 @@ class SnapTool(QApplication):
         )
 
     def _setup_hotkey(self):
-        """设置全局热键 - Mac: Ctrl+A, Windows: Shift+Alt+B"""
+        """设置全局热键 - Mac: Ctrl+A (使用 Quartz), Windows: Shift+Alt+B (使用 pynput)"""
+        if sys.platform == 'darwin':
+            self._setup_hotkey_macos()
+        else:
+            self._setup_hotkey_pynput()
+
+    def _setup_hotkey_macos(self):
+        """macOS: 使用 Quartz CGEventTap 监听全局按键"""
+        import Quartz
+        from Quartz import (
+            CGEventTapCreate, kCGSessionEventTap, kCGHeadInsertEventTap,
+            kCGEventKeyDown, CGEventTapEnable, CFMachPortCreateRunLoopSource,
+            CFRunLoopGetCurrent, CFRunLoopAddSource, kCFRunLoopCommonModes,
+            CGEventGetFlags, CGEventGetIntegerValueField, kCGKeyboardEventKeycode,
+            kCGEventFlagMaskControl
+        )
+        import threading
+
+        def callback(proxy, event_type, event, refcon):
+            if event_type == kCGEventKeyDown:
+                # 检查是否按下 Ctrl
+                flags = CGEventGetFlags(event)
+                ctrl_pressed = (flags & kCGEventFlagMaskControl) != 0
+
+                # 获取按键码 (A 键的 keycode 是 0)
+                keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
+
+                if ctrl_pressed and keycode == 0:  # Ctrl + A
+                    self.hotkey_signal.triggered.emit()
+
+            return event
+
+        # 创建事件监听
+        event_mask = (1 << kCGEventKeyDown)
+        tap = CGEventTapCreate(
+            kCGSessionEventTap,
+            kCGHeadInsertEventTap,
+            0,  # 不修改事件
+            event_mask,
+            callback,
+            None
+        )
+
+        if tap:
+            run_loop_source = CFMachPortCreateRunLoopSource(None, tap, 0)
+
+            def run_tap():
+                CFRunLoopAddSource(CFRunLoopGetCurrent(), run_loop_source, kCFRunLoopCommonModes)
+                CGEventTapEnable(tap, True)
+                Quartz.CFRunLoopRun()
+
+            tap_thread = threading.Thread(target=run_tap, daemon=True)
+            tap_thread.start()
+
+    def _setup_hotkey_pynput(self):
+        """Windows: 使用 pynput 监听全局按键"""
         self.current_keys = set()
 
         def on_press(key):
             self.current_keys.add(key)
 
-            if sys.platform == 'darwin':
-                # Mac: Ctrl+A
-                ctrl_pressed = (
-                    keyboard.Key.ctrl in self.current_keys or
-                    keyboard.Key.ctrl_l in self.current_keys or
-                    keyboard.Key.ctrl_r in self.current_keys
-                )
-                try:
-                    a_pressed = hasattr(key, 'char') and key.char and key.char.lower() == 'a'
-                except AttributeError:
-                    a_pressed = False
+            # Windows: Shift+Alt+B
+            shift_pressed = (
+                keyboard.Key.shift in self.current_keys or
+                keyboard.Key.shift_l in self.current_keys or
+                keyboard.Key.shift_r in self.current_keys
+            )
+            alt_pressed = (
+                keyboard.Key.alt in self.current_keys or
+                keyboard.Key.alt_l in self.current_keys or
+                keyboard.Key.alt_r in self.current_keys or
+                keyboard.Key.alt_gr in self.current_keys
+            )
+            try:
+                b_pressed = hasattr(key, 'char') and key.char and key.char.lower() == 'b'
+            except AttributeError:
+                b_pressed = False
 
-                if ctrl_pressed and a_pressed:
-                    self.hotkey_signal.triggered.emit()
-                    self.current_keys.clear()
-            else:
-                # Windows: Shift+Alt+B
-                shift_pressed = (
-                    keyboard.Key.shift in self.current_keys or
-                    keyboard.Key.shift_l in self.current_keys or
-                    keyboard.Key.shift_r in self.current_keys
-                )
-                alt_pressed = (
-                    keyboard.Key.alt in self.current_keys or
-                    keyboard.Key.alt_l in self.current_keys or
-                    keyboard.Key.alt_r in self.current_keys or
-                    keyboard.Key.alt_gr in self.current_keys
-                )
-                try:
-                    b_pressed = hasattr(key, 'char') and key.char and key.char.lower() == 'b'
-                except AttributeError:
-                    b_pressed = False
-
-                if shift_pressed and alt_pressed and b_pressed:
-                    self.hotkey_signal.triggered.emit()
-                    self.current_keys.clear()
+            if shift_pressed and alt_pressed and b_pressed:
+                self.hotkey_signal.triggered.emit()
+                self.current_keys.clear()
 
         def on_release(key):
             self.current_keys.discard(key)
