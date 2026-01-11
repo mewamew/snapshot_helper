@@ -52,7 +52,9 @@ class ScreenshotOverlay(QWidget):
         self.is_drawing = False  # 是否正在涂鸦
 
         # 绘图工具设置
-        self.current_tool = 'pen'  # 'pen', 'rect', 'circle', 'arrow', 'eraser'
+        self.current_tool = 'move'  # 'move', 'pen', 'rect', 'circle', 'arrow', 'eraser'
+        self.is_moving = False  # 是否正在移动选择框
+        self.move_start_pos = None  # 移动起始位置
         self.current_color = QColor(255, 60, 60)  # 红色
         self.current_width = 4  # 笔触粗细（默认中等）
         self.draw_start_pos = None  # 绘制形状的起始位置
@@ -425,8 +427,8 @@ class ScreenshotOverlay(QWidget):
         padding = 12
         separator_width = 8  # 分隔线占用的宽度
 
-        # 计算工具栏总宽度：14个按钮 + 13个间距 + 2个分隔线 + 2个padding
-        toolbar_width = (btn_size * 14) + (spacing * 13) + (separator_width * 2) + (padding * 2)
+        # 计算工具栏总宽度：15个按钮 + 14个间距 + 2个分隔线 + 2个padding
+        toolbar_width = (btn_size * 15) + (spacing * 14) + (separator_width * 2) + (padding * 2)
         toolbar_height = btn_size + padding * 2
 
         # 工具栏位置：底部居中
@@ -454,7 +456,13 @@ class ScreenshotOverlay(QWidget):
         # 当前按钮x坐标
         current_x = toolbar_x + padding
 
-        # 1. 矩形工具
+        # 1. 移动工具
+        move_btn = QRect(current_x, toolbar_y + padding, btn_size, btn_size)
+        self.move_btn_rect = move_btn
+        self._draw_tool_button(painter, move_btn, "✥", self.current_tool == 'move')
+        current_x += btn_size + spacing
+
+        # 2. 矩形工具
         rect_btn = QRect(current_x, toolbar_y + padding, btn_size, btn_size)
         self.rect_btn_rect = rect_btn
         self._draw_tool_button(painter, rect_btn, "□", self.current_tool == 'rect')
@@ -602,6 +610,57 @@ class ScreenshotOverlay(QWidget):
 
             # 恢复画刷设置
             painter.setBrush(saved_brush)
+        elif text == "✥":
+            # 绘制移动图标（四方箭头）
+            from PyQt6.QtCore import QPointF
+            from PyQt6.QtGui import QPolygonF
+
+            saved_brush = painter.brush()
+            painter.setPen(QPen(color, pen_width))
+            painter.setBrush(color)
+
+            # 十字线长度
+            line_len = icon_size // 2 - 2
+            arrow_size = 5
+
+            # 绘制水平线
+            painter.drawLine(center.x() - line_len, center.y(), center.x() + line_len, center.y())
+            # 绘制垂直线
+            painter.drawLine(center.x(), center.y() - line_len, center.x(), center.y() + line_len)
+
+            # 右箭头
+            right_arrow = QPolygonF([
+                QPointF(center.x() + line_len, center.y()),
+                QPointF(center.x() + line_len - arrow_size, center.y() - arrow_size // 2 - 1),
+                QPointF(center.x() + line_len - arrow_size, center.y() + arrow_size // 2 + 1)
+            ])
+            painter.drawPolygon(right_arrow)
+
+            # 左箭头
+            left_arrow = QPolygonF([
+                QPointF(center.x() - line_len, center.y()),
+                QPointF(center.x() - line_len + arrow_size, center.y() - arrow_size // 2 - 1),
+                QPointF(center.x() - line_len + arrow_size, center.y() + arrow_size // 2 + 1)
+            ])
+            painter.drawPolygon(left_arrow)
+
+            # 上箭头
+            up_arrow = QPolygonF([
+                QPointF(center.x(), center.y() - line_len),
+                QPointF(center.x() - arrow_size // 2 - 1, center.y() - line_len + arrow_size),
+                QPointF(center.x() + arrow_size // 2 + 1, center.y() - line_len + arrow_size)
+            ])
+            painter.drawPolygon(up_arrow)
+
+            # 下箭头
+            down_arrow = QPolygonF([
+                QPointF(center.x(), center.y() + line_len),
+                QPointF(center.x() - arrow_size // 2 - 1, center.y() + line_len - arrow_size),
+                QPointF(center.x() + arrow_size // 2 + 1, center.y() + line_len - arrow_size)
+            ])
+            painter.drawPolygon(down_arrow)
+
+            painter.setBrush(saved_brush)
         else:
             # 其他图标（画笔、橡皮擦等）用文字
             painter.setPen(color)
@@ -711,6 +770,10 @@ class ScreenshotOverlay(QWidget):
                     return
 
                 # 检查工具选择按钮
+                if hasattr(self, 'move_btn_rect') and self.move_btn_rect.contains(event.pos()):
+                    self.current_tool = 'move'
+                    clicked_button = True
+
                 if hasattr(self, 'pen_btn_rect') and self.pen_btn_rect.contains(event.pos()):
                     self.current_tool = 'pen'
                     clicked_button = True
@@ -758,16 +821,22 @@ class ScreenshotOverlay(QWidget):
                     self.update()
                     return
 
-                # 在选择区域内开始绘制
+                # 在选择区域内开始绘制或移动
                 rect = self._get_selection_rect()
                 if rect.contains(event.pos()):
-                    self.is_drawing = True
-                    self.draw_start_pos = event.pos()
-                    if self.current_tool in ['pen', 'eraser']:
-                        self.current_path = [event.pos()]
+                    if self.current_tool == 'move':
+                        # 移动模式：开始拖拽选择框
+                        self.is_moving = True
+                        self.move_start_pos = event.pos()
                     else:
-                        # 矩形和圆形只需要起点
-                        self.current_path = [event.pos()]
+                        # 绘制模式
+                        self.is_drawing = True
+                        self.draw_start_pos = event.pos()
+                        if self.current_tool in ['pen', 'eraser']:
+                            self.current_path = [event.pos()]
+                        else:
+                            # 矩形和圆形只需要起点
+                            self.current_path = [event.pos()]
             else:
                 # 选择模式：开始框选
                 self.start_pos = event.pos()
@@ -776,10 +845,18 @@ class ScreenshotOverlay(QWidget):
             self.update()
 
     def mouseMoveEvent(self, event):
-        """鼠标移动更新选择区域或涂鸦"""
+        """鼠标移动更新选择区域、涂鸦或移动选择框"""
         if self.is_selecting:
             self.end_pos = event.pos()
             self.update()
+        elif self.is_moving:
+            # 移动选择框
+            if self.move_start_pos:
+                delta = event.pos() - self.move_start_pos
+                self.start_pos = self.start_pos + delta
+                self.end_pos = self.end_pos + delta
+                self.move_start_pos = event.pos()
+                self.update()
         elif self.is_drawing:
             if self.current_tool in ['pen', 'eraser']:
                 # 画笔/橡皮擦：记录所有移动点
@@ -793,7 +870,7 @@ class ScreenshotOverlay(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, event):
-        """鼠标释放完成选择或涂鸦"""
+        """鼠标释放完成选择、涂鸦或移动"""
         if event.button() == Qt.MouseButton.LeftButton:
             if self.is_selecting:
                 # 完成框选，进入编辑模式
@@ -806,6 +883,11 @@ class ScreenshotOverlay(QWidget):
                     self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
                 else:
                     self.close()
+                self.update()
+            elif self.is_moving:
+                # 完成移动
+                self.is_moving = False
+                self.move_start_pos = None
                 self.update()
             elif self.is_drawing:
                 # 完成绘制
