@@ -25,7 +25,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QRect, QPoint, pyqtSignal, QObject, QTimer
 from PyQt6.QtGui import (
-    QPainter, QColor, QPen, QPixmap, QCursor, QIcon, QAction, QImage, QGuiApplication
+    QPainter, QColor, QPen, QPixmap, QCursor, QIcon, QAction, QImage, QGuiApplication,
+    QFontMetrics, QFont
 )
 from pynput import keyboard
 import mss
@@ -52,7 +53,7 @@ class ScreenshotOverlay(QWidget):
         self.is_drawing = False  # 是否正在涂鸦
 
         # 绘图工具设置
-        self.current_tool = 'move'  # 'move', 'pen', 'rect', 'circle', 'arrow', 'eraser'
+        self.current_tool = 'move'  # 'move', 'pen', 'rect', 'circle', 'arrow', 'line', 'eraser'
         self.is_moving = False  # 是否正在移动选择框
         self.move_start_pos = None  # 移动起始位置
         self.current_color = QColor(255, 60, 60)  # 红色
@@ -60,6 +61,9 @@ class ScreenshotOverlay(QWidget):
         self.draw_start_pos = None  # 绘制形状的起始位置
         self.text_input = None  # QLineEdit 文字输入框
         self.text_input_pos = None  # 文字输入位置
+        self.current_font_size = 20  # 默认中等字号
+        self.dragging_text_index = None  # 正在拖拽的文字索引
+        self.drag_offset = None  # 拖拽偏移量
 
         geometry, mss_monitor, dpr, screen = screen_info
         self.screen = screen
@@ -232,7 +236,7 @@ class ScreenshotOverlay(QWidget):
                 painter.drawPixmap(rect, self.background_pixmap, src_rect)
 
             # 绘制已完成的图形
-            for item in self.drawing_paths:
+            for idx, item in enumerate(self.drawing_paths):
                 shape_type = item[0]
                 color = item[1]
                 width = item[2]
@@ -259,6 +263,9 @@ class ScreenshotOverlay(QWidget):
                 elif shape_type == 'arrow' and len(data) == 2:
                     # 箭头
                     self._draw_arrow(painter, data[0], data[1], color, width)
+                elif shape_type == 'line' and len(data) == 2:
+                    # 直线
+                    painter.drawLine(data[0], data[1])
                 elif shape_type == 'text' and len(data) == 2:
                     # 文字
                     pos, text = data
@@ -268,6 +275,22 @@ class ScreenshotOverlay(QWidget):
                     painter.setFont(font)
                     painter.setPen(color)
                     painter.drawText(pos, text)
+
+                    # 如果正在拖拽这个文字，绘制虚线矩形框
+                    if idx == self.dragging_text_index:
+                        font_metrics = QFontMetrics(font)
+                        text_width = font_metrics.horizontalAdvance(text)
+                        text_height = font_metrics.height()
+                        text_rect = QRect(
+                            pos.x() - 4,
+                            pos.y() - text_height,
+                            text_width + 8,
+                            text_height + 4
+                        )
+                        dash_pen = QPen(QColor(0, 122, 255), 2, Qt.PenStyle.DashLine)
+                        painter.setPen(dash_pen)
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.drawRect(text_rect)
 
             # 绘制当前正在绘制的图形
             if self.is_drawing:
@@ -304,6 +327,9 @@ class ScreenshotOverlay(QWidget):
                         # 箭头预览
                         self._draw_arrow(painter, self.draw_start_pos, self.current_path[-1],
                                        self.current_color, self.current_width)
+                    elif self.current_tool == 'line' and self.draw_start_pos and len(self.current_path) > 0:
+                        # 直线预览
+                        painter.drawLine(self.draw_start_pos, self.current_path[-1])
 
             # 绘制选择框边框（蓝色，较细）
             pen = QPen(QColor(0, 120, 215), 2)
@@ -438,8 +464,13 @@ class ScreenshotOverlay(QWidget):
         padding = 12
         separator_width = 8  # 分隔线占用的宽度
 
-        # 计算工具栏总宽度：16个按钮 + 15个间距 + 2个分隔线 + 2个padding
-        toolbar_width = (btn_size * 16) + (spacing * 15) + (separator_width * 2) + (padding * 2)
+        # 动态计算按钮数量：文字工具时显示字体大小按钮（+3个）
+        base_btn_count = 17  # 基础按钮数量（含直线工具）
+        font_size_btn_count = 3 if self.current_tool == 'text' else 0
+        total_btn_count = base_btn_count + font_size_btn_count
+
+        # 计算工具栏总宽度
+        toolbar_width = (btn_size * total_btn_count) + (spacing * (total_btn_count - 1)) + (separator_width * 2) + (padding * 2)
         toolbar_height = btn_size + padding * 2
 
         # 工具栏位置：底部居中
@@ -497,7 +528,13 @@ class ScreenshotOverlay(QWidget):
         self._draw_tool_button(painter, arrow_btn, "→", self.current_tool == 'arrow')
         current_x += btn_size + spacing
 
-        # 5. 橡皮擦工具
+        # 5. 直线工具
+        line_btn = QRect(current_x, toolbar_y + padding, btn_size, btn_size)
+        self.line_btn_rect = line_btn
+        self._draw_tool_button(painter, line_btn, "╱", self.current_tool == 'line')
+        current_x += btn_size + spacing
+
+        # 6. 橡皮擦工具
         eraser_btn = QRect(current_x, toolbar_y + padding, btn_size, btn_size)
         self.eraser_btn_rect = eraser_btn
         self._draw_tool_button(painter, eraser_btn, "⌫", self.current_tool == 'eraser')
@@ -509,7 +546,18 @@ class ScreenshotOverlay(QWidget):
         self._draw_tool_button(painter, text_btn, "A", self.current_tool == 'text')
         current_x += btn_size + spacing
 
-        # 7-9. 颜色选择（红、绿、蓝）
+        # 7-9. 字体大小选择（仅文字工具时显示）
+        self.font_size_btn_rects = []
+        if self.current_tool == 'text':
+            font_sizes = [(14, "S"), (20, "M"), (28, "L")]
+            for size, label in font_sizes:
+                font_btn = QRect(current_x, toolbar_y + padding, btn_size, btn_size)
+                self.font_size_btn_rects.append((font_btn, size))
+                is_selected = (self.current_font_size == size)
+                self._draw_font_size_button(painter, font_btn, label, is_selected, True)
+                current_x += btn_size + spacing
+
+        # 10-12. 颜色选择（红、绿、蓝）
         colors = [QColor(255, 60, 60), QColor(76, 217, 100), QColor(0, 122, 255)]
         self.color_btn_rects = []
         for color in colors:
@@ -753,6 +801,45 @@ class ScreenshotOverlay(QWidget):
         painter.setFont(font)
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
+    def _draw_font_size_button(self, painter, rect, label, is_selected, is_active):
+        """绘制字体大小按钮"""
+        if is_selected:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 122, 255, 50))
+            painter.drawRoundedRect(rect, 6, 6)
+
+        # 非激活状态（非文字工具）显示灰色
+        if is_active:
+            color = QColor(0, 122, 255) if is_selected else QColor(60, 60, 60)
+        else:
+            color = QColor(180, 180, 180)
+
+        painter.setPen(color)
+        font = painter.font()
+        font.setPointSize(16)
+        font.setBold(is_selected)
+        painter.setFont(font)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+
+    def _get_text_at_pos(self, pos):
+        """检测点击位置是否有文字，返回文字索引或 None"""
+        for i, (shape_type, color, size, data) in enumerate(self.drawing_paths):
+            if shape_type == 'text' and len(data) == 2:
+                text_pos, text = data
+                # 估算文字边界框
+                font_metrics = QFontMetrics(QFont("", size))
+                text_width = font_metrics.horizontalAdvance(text)
+                text_height = font_metrics.height()
+                text_rect = QRect(
+                    text_pos.x(),
+                    text_pos.y() - text_height,
+                    text_width,
+                    text_height
+                )
+                if text_rect.contains(pos):
+                    return i
+        return None
+
     def _show_text_input(self, pos):
         """在指定位置显示文字输入框"""
         from PyQt6.QtWidgets import QLineEdit
@@ -782,18 +869,23 @@ class ScreenshotOverlay(QWidget):
         if self.text_input and self.text_input_pos:
             text = self.text_input.text().strip()
             if text:
-                # 字体大小映射：2->14, 4->18, 6->22
-                font_size = 14 + (self.current_width - 2) * 2
                 self.drawing_paths.append((
                     'text',
                     self.current_color,
-                    font_size,
+                    self.current_font_size,
                     [self.text_input_pos, text]
                 ))
             self.text_input.deleteLater()
             self.text_input = None
             self.text_input_pos = None
             self.update()
+
+    def _close_text_input(self):
+        """关闭文字输入框（不提交）"""
+        if self.text_input:
+            self.text_input.deleteLater()
+            self.text_input = None
+            self.text_input_pos = None
 
     def _get_selection_rect(self):
         """获取选择区域的矩形"""
@@ -849,6 +941,10 @@ class ScreenshotOverlay(QWidget):
                     self.current_tool = 'arrow'
                     clicked_button = True
 
+                if hasattr(self, 'line_btn_rect') and self.line_btn_rect.contains(event.pos()):
+                    self.current_tool = 'line'
+                    clicked_button = True
+
                 if hasattr(self, 'eraser_btn_rect') and self.eraser_btn_rect.contains(event.pos()):
                     self.current_tool = 'eraser'
                     clicked_button = True
@@ -856,6 +952,14 @@ class ScreenshotOverlay(QWidget):
                 if hasattr(self, 'text_btn_rect') and self.text_btn_rect.contains(event.pos()):
                     self.current_tool = 'text'
                     clicked_button = True
+
+                # 检查字体大小按钮
+                if hasattr(self, 'font_size_btn_rects'):
+                    for btn_rect, size in self.font_size_btn_rects:
+                        if btn_rect.contains(event.pos()):
+                            self.current_font_size = size
+                            clicked_button = True
+                            break
 
                 # 检查颜色选择按钮
                 if hasattr(self, 'color_btn_rects'):
@@ -892,8 +996,30 @@ class ScreenshotOverlay(QWidget):
                         self.is_moving = True
                         self.move_start_pos = event.pos()
                     elif self.current_tool == 'text':
-                        # 文字模式：显示输入框
-                        self._show_text_input(event.pos())
+                        # 文字模式
+                        # 如果有输入框正在显示，先处理它
+                        if self.text_input and self.text_input.isVisible():
+                            # 如果有内容则提交，否则关闭
+                            if self.text_input.text().strip():
+                                self._commit_text_input()
+                            else:
+                                self._close_text_input()
+                            self.update()
+                            return
+
+                        # 检查是否点击了已有文字
+                        text_index = self._get_text_at_pos(event.pos())
+                        if text_index is not None:
+                            # 开始拖拽文字
+                            self.dragging_text_index = text_index
+                            text_pos = self.drawing_paths[text_index][3][0]
+                            self.drag_offset = QPoint(
+                                event.pos().x() - text_pos.x(),
+                                event.pos().y() - text_pos.y()
+                            )
+                        else:
+                            # 显示文字输入框添加新文字
+                            self._show_text_input(event.pos())
                     else:
                         # 绘制模式
                         self.is_drawing = True
@@ -923,6 +1049,17 @@ class ScreenshotOverlay(QWidget):
                 self.end_pos = self.end_pos + delta
                 self.move_start_pos = event.pos()
                 self.update()
+        elif self.dragging_text_index is not None:
+            # 拖拽文字
+            new_pos = QPoint(
+                event.pos().x() - self.drag_offset.x(),
+                event.pos().y() - self.drag_offset.y()
+            )
+            # 更新文字位置
+            shape_type, color, size, data = self.drawing_paths[self.dragging_text_index]
+            data[0] = new_pos
+            self.drawing_paths[self.dragging_text_index] = (shape_type, color, size, data)
+            self.update()
         elif self.is_drawing:
             if self.current_tool in ['pen', 'eraser']:
                 # 画笔/橡皮擦：记录所有移动点
@@ -955,6 +1092,11 @@ class ScreenshotOverlay(QWidget):
                 self.is_moving = False
                 self.move_start_pos = None
                 self.update()
+            elif self.dragging_text_index is not None:
+                # 完成文字拖拽
+                self.dragging_text_index = None
+                self.drag_offset = None
+                self.update()
             elif self.is_drawing:
                 # 完成绘制
                 self.is_drawing = False
@@ -970,8 +1112,8 @@ class ScreenshotOverlay(QWidget):
                         self.current_width,
                         self.current_path.copy()
                     ))
-                elif self.current_tool in ['rect', 'circle', 'arrow'] and self.draw_start_pos and len(self.current_path) > 0:
-                    # 矩形/圆形/箭头：保存起点和终点
+                elif self.current_tool in ['rect', 'circle', 'arrow', 'line'] and self.draw_start_pos and len(self.current_path) > 0:
+                    # 矩形/圆形/箭头/直线：保存起点和终点
                     self.drawing_paths.append((
                         self.current_tool,
                         self.current_color,
@@ -1065,6 +1207,17 @@ class ScreenshotOverlay(QWidget):
                     )
                     if dist <= erase_radius:
                         return True
+            elif shape_type == 'line' and len(data) == 2:
+                # 检查直线是否与橡皮擦相交
+                p1 = data[0]
+                p2 = data[1]
+                for eraser_point in eraser_path:
+                    dist = point_to_segment_distance(
+                        eraser_point.x(), eraser_point.y(),
+                        p1.x(), p1.y(), p2.x(), p2.y()
+                    )
+                    if dist <= erase_radius:
+                        return True
             elif shape_type == 'text' and len(data) == 2:
                 # 检查文字位置是否与橡皮擦相交
                 text_pos = data[0]
@@ -1098,7 +1251,7 @@ class ScreenshotOverlay(QWidget):
             toolbar_buttons = [
                 'cancel_btn_rect', 'confirm_btn_rect', 'pen_btn_rect',
                 'rect_btn_rect', 'circle_btn_rect', 'arrow_btn_rect',
-                'eraser_btn_rect', 'text_btn_rect', 'undo_btn_rect'
+                'line_btn_rect', 'eraser_btn_rect', 'text_btn_rect', 'undo_btn_rect'
             ]
 
             for btn_name in toolbar_buttons:
@@ -1118,6 +1271,12 @@ class ScreenshotOverlay(QWidget):
 
                 if hasattr(self, 'width_btn_rects') and not clicked_on_toolbar:
                     for btn_rect, _ in self.width_btn_rects:
+                        if btn_rect.contains(event.pos()):
+                            clicked_on_toolbar = True
+                            break
+
+                if hasattr(self, 'font_size_btn_rects') and not clicked_on_toolbar:
+                    for btn_rect, _ in self.font_size_btn_rects:
                         if btn_rect.contains(event.pos()):
                             clicked_on_toolbar = True
                             break
@@ -1213,6 +1372,17 @@ class ScreenshotOverlay(QWidget):
                             data[1].y() - rect.y()
                         )
                         self._draw_arrow(painter, p1, p2, color, width)
+                    elif shape_type == 'line' and len(data) == 2:
+                        # 直线：绘制直线
+                        p1 = QPoint(
+                            data[0].x() - rect.x(),
+                            data[0].y() - rect.y()
+                        )
+                        p2 = QPoint(
+                            data[1].x() - rect.x(),
+                            data[1].y() - rect.y()
+                        )
+                        painter.drawLine(p1, p2)
                     elif shape_type == 'text' and len(data) == 2:
                         # 文字：绘制文字
                         pos = QPoint(
