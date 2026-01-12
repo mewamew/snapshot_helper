@@ -7,6 +7,7 @@
 import sys
 import os
 import ctypes
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -62,8 +63,10 @@ class ScreenshotOverlay(QWidget):
         self.text_input = None  # QLineEdit 文字输入框
         self.text_input_pos = None  # 文字输入位置
         self.current_font_size = 20  # 默认中等字号
-        self.dragging_text_index = None  # 正在拖拽的文字索引
-        self.drag_offset = None  # 拖拽偏移量
+        # 图形拖拽状态
+        self.dragging_shape_index = None  # 正在拖拽的图形索引
+        self.hovered_shape_index = None   # 鼠标悬停的图形索引
+        self.drag_start_pos = None        # 拖拽起始位置
 
         # 参数面板状态
         self.param_panel_open = False  # 参数面板是否打开
@@ -78,6 +81,13 @@ class ScreenshotOverlay(QWidget):
         self.selected_window_id = None  # 选中的窗口ID（用于单窗口截图）
         self.selected_window_pixmap = None  # 选中窗口的截图（用于编辑时显示）
         self.last_window_refresh = 0    # 上次刷新窗口列表的时间
+
+        # 文字直接输入状态（无输入框模式）
+        self.text_editing = False       # 是否正在输入文字
+        self.text_editing_pos = None    # 输入位置
+        self.text_editing_content = ""  # 当前输入的内容
+        self.cursor_visible = True      # 光标是否可见（用于闪烁）
+        self.cursor_timer = None        # 光标闪烁定时器
 
         geometry, mss_monitor, dpr, screen = screen_info
         self.screen = screen
@@ -200,7 +210,7 @@ class ScreenshotOverlay(QWidget):
                 self.background_pixmap.setDevicePixelRatio(self.dpr)
 
     def _refresh_windows(self):
-        """刷新屏幕上的窗口列表（macOS only）"""
+        """刷新屏幕上的窗口列表"""
         import time
         current_time = time.time()
 
@@ -209,9 +219,13 @@ class ScreenshotOverlay(QWidget):
             return
         self.last_window_refresh = current_time
 
-        if sys.platform != 'darwin':
-            return
+        if sys.platform == 'darwin':
+            self._refresh_windows_macos()
+        elif sys.platform == 'win32':
+            self._refresh_windows_windows()
 
+    def _refresh_windows_macos(self):
+        """macOS: 使用 Quartz 获取窗口列表"""
         try:
             from Quartz import (
                 CGWindowListCopyWindowInfo,
@@ -259,6 +273,76 @@ class ScreenshotOverlay(QWidget):
             print(f"窗口检测失败: {e}")
             self.detected_windows = []
 
+    def _refresh_windows_windows(self):
+        """Windows: 使用 win32gui 获取窗口列表"""
+        try:
+            import win32gui
+            import win32process
+
+            self.detected_windows = []
+            current_pid = os.getpid()
+
+            def enum_windows_callback(hwnd, _):
+                # 跳过不可见窗口
+                if not win32gui.IsWindowVisible(hwnd):
+                    return True
+
+                # 跳过最小化窗口
+                if win32gui.IsIconic(hwnd):
+                    return True
+
+                # 获取窗口位置
+                try:
+                    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+                except Exception:
+                    return True
+
+                width = right - left
+                height = bottom - top
+
+                # 跳过太小的窗口
+                if width < 50 or height < 50:
+                    return True
+
+                # 跳过自己的窗口
+                try:
+                    _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    if pid == current_pid:
+                        return True
+                except Exception:
+                    pass
+
+                # 获取窗口标题
+                try:
+                    title = win32gui.GetWindowText(hwnd)
+                except Exception:
+                    title = ''
+
+                # 跳过没有标题的窗口（通常是系统窗口）
+                if not title:
+                    return True
+
+                window = {
+                    'id': hwnd,  # 窗口句柄，用于单窗口截图
+                    'layer': 0,  # Windows 没有 layer 概念，统一设为 0
+                    'name': title,
+                    'owner': '',
+                    'rect': QRect(left, top, width, height)
+                }
+                self.detected_windows.append(window)
+                return True
+
+            win32gui.EnumWindows(enum_windows_callback, None)
+
+            # Windows 的 EnumWindows 按 Z-order 返回（前面的窗口先返回）
+
+        except ImportError:
+            print("窗口检测需要 pywin32，请运行: pip install pywin32")
+            self.detected_windows = []
+        except Exception as e:
+            print(f"窗口检测失败: {e}")
+            self.detected_windows = []
+
     def _get_window_at_pos(self, pos):
         """获取指定位置的窗口矩形和ID，返回 (rect, window_id) 或 (None, None)"""
         # 先刷新窗口列表
@@ -291,10 +375,15 @@ class ScreenshotOverlay(QWidget):
         return None, None
 
     def _capture_single_window(self, window_id):
-        """截取单个窗口的图像（macOS only）"""
-        if sys.platform != 'darwin':
-            return None
+        """截取单个窗口的图像"""
+        if sys.platform == 'darwin':
+            return self._capture_single_window_macos(window_id)
+        elif sys.platform == 'win32':
+            return self._capture_single_window_windows(window_id)
+        return None
 
+    def _capture_single_window_macos(self, window_id):
+        """macOS: 使用 Quartz 截取单个窗口"""
         try:
             import Quartz
             from Quartz import (
@@ -330,6 +419,69 @@ class ScreenshotOverlay(QWidget):
 
             return pixmap
 
+        except Exception as e:
+            print(f"单窗口截图失败: {e}")
+            return None
+
+    def _capture_single_window_windows(self, hwnd):
+        """Windows: 使用 PrintWindow 截取单个窗口"""
+        try:
+            import win32gui
+            import win32ui
+            import win32con
+
+            # 获取窗口尺寸
+            left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+            width = right - left
+            height = bottom - top
+
+            if width <= 0 or height <= 0:
+                return None
+
+            # 创建设备上下文
+            hwnd_dc = win32gui.GetWindowDC(hwnd)
+            mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+            save_dc = mfc_dc.CreateCompatibleDC()
+
+            # 创建位图
+            bitmap = win32ui.CreateBitmap()
+            bitmap.CreateCompatibleBitmap(mfc_dc, width, height)
+            save_dc.SelectObject(bitmap)
+
+            # 使用 PrintWindow 截取窗口（包括被遮挡部分）
+            # PW_RENDERFULLCONTENT = 2，可以截取 DWM 合成的内容
+            result = ctypes.windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 2)
+
+            if not result:
+                # 如果 PrintWindow 失败，尝试使用 BitBlt
+                save_dc.BitBlt((0, 0), (width, height), mfc_dc, (0, 0), win32con.SRCCOPY)
+
+            # 获取位图数据
+            bmp_info = bitmap.GetInfo()
+            bmp_bits = bitmap.GetBitmapBits(True)
+
+            # 转换为 QImage (BGRA 格式)
+            qimg = QImage(
+                bmp_bits,
+                bmp_info['bmWidth'],
+                bmp_info['bmHeight'],
+                QImage.Format.Format_ARGB32
+            )
+
+            # 清理资源
+            win32gui.DeleteObject(bitmap.GetHandle())
+            save_dc.DeleteDC()
+            mfc_dc.DeleteDC()
+            win32gui.ReleaseDC(hwnd, hwnd_dc)
+
+            pixmap = QPixmap.fromImage(qimg.copy())
+            pixmap.setDevicePixelRatio(self.dpr)
+
+            return pixmap
+
+        except ImportError:
+            print("单窗口截图需要 pywin32，请运行: pip install pywin32")
+            return None
         except Exception as e:
             print(f"单窗口截图失败: {e}")
             return None
@@ -442,21 +594,16 @@ class ScreenshotOverlay(QWidget):
                     painter.setPen(color)
                     painter.drawText(pos, text)
 
-                    # 如果正在拖拽这个文字，绘制虚线矩形框
-                    if idx == self.dragging_text_index:
-                        font_metrics = QFontMetrics(font)
-                        text_width = font_metrics.horizontalAdvance(text)
-                        text_height = font_metrics.height()
-                        text_rect = QRect(
-                            pos.x() - 4,
-                            pos.y() - text_height,
-                            text_width + 8,
-                            text_height + 4
-                        )
+                # 如果正在拖拽或悬停这个图形，绘制虚线矩形框
+                if idx == self.dragging_shape_index or idx == self.hovered_shape_index:
+                    bounds = self._get_shape_bounds(idx)
+                    if not bounds.isEmpty():
+                        # 添加一些 padding
+                        bounds = bounds.adjusted(-4, -4, 4, 4)
                         dash_pen = QPen(QColor(0, 122, 255), 2, Qt.PenStyle.DashLine)
                         painter.setPen(dash_pen)
                         painter.setBrush(Qt.BrushStyle.NoBrush)
-                        painter.drawRect(text_rect)
+                        painter.drawRect(bounds)
 
             # 绘制当前正在绘制的图形
             if self.is_drawing:
@@ -496,6 +643,33 @@ class ScreenshotOverlay(QWidget):
                     elif self.current_tool == 'line' and self.draw_start_pos and len(self.current_path) > 0:
                         # 直线预览
                         painter.drawLine(self.draw_start_pos, self.current_path[-1])
+
+            # 绘制正在输入的文字和光标
+            if self.text_editing and self.text_editing_pos:
+                font = painter.font()
+                font.setPointSize(self.current_font_size)
+                font.setBold(True)
+                painter.setFont(font)
+                painter.setPen(self.current_color)
+
+                # 绘制已输入的文字
+                if self.text_editing_content:
+                    painter.drawText(self.text_editing_pos, self.text_editing_content)
+
+                # 绘制光标
+                if self.cursor_visible:
+                    font_metrics = QFontMetrics(font)
+                    if self.text_editing_content:
+                        cursor_x = self.text_editing_pos.x() + font_metrics.horizontalAdvance(self.text_editing_content)
+                    else:
+                        cursor_x = self.text_editing_pos.x()
+                    cursor_y = self.text_editing_pos.y()
+                    cursor_height = font_metrics.height()
+
+                    # 绘制光标线
+                    cursor_pen = QPen(self.current_color, 2)
+                    painter.setPen(cursor_pen)
+                    painter.drawLine(cursor_x, cursor_y - cursor_height + 4, cursor_x, cursor_y + 4)
 
             # 绘制选择框边框（蓝色，较细）
             pen = QPen(QColor(0, 120, 215), 2)
@@ -1097,29 +1271,179 @@ class ScreenshotOverlay(QWidget):
                     return i
         return None
 
+    def _get_shape_at_pos(self, pos):
+        """检测点击位置的图形，返回索引或 None（后绘制的优先）"""
+        # 从后往前遍历（后绘制的在上层）
+        for i in range(len(self.drawing_paths) - 1, -1, -1):
+            shape_type, color, size, data = self.drawing_paths[i]
+            if self._point_in_shape(pos, shape_type, data, size):
+                return i
+        return None
+
+    def _point_in_shape(self, pos, shape_type, data, size):
+        """判断点是否在图形内或边框附近"""
+        tolerance = 8  # 检测容差（像素）
+
+        if shape_type == 'text' and len(data) == 2:
+            text_pos, text = data
+            font_metrics = QFontMetrics(QFont("", size))
+            text_width = font_metrics.horizontalAdvance(text)
+            text_height = font_metrics.height()
+            text_rect = QRect(
+                text_pos.x() - tolerance,
+                text_pos.y() - text_height - tolerance,
+                text_width + tolerance * 2,
+                text_height + tolerance * 2
+            )
+            return text_rect.contains(pos)
+
+        elif shape_type == 'rect' and len(data) == 2:
+            # 矩形：检测是否在矩形区域内（包含边框容差）
+            rect = QRect(data[0], data[1]).normalized()
+            expanded = rect.adjusted(-tolerance, -tolerance, tolerance, tolerance)
+            return expanded.contains(pos)
+
+        elif shape_type == 'circle' and len(data) == 2:
+            # 椭圆：检测是否在椭圆区域内（包含边框容差）
+            rect = QRect(data[0], data[1]).normalized()
+            center_x = rect.center().x()
+            center_y = rect.center().y()
+            a = rect.width() / 2 + tolerance  # 半长轴 + 容差
+            b = rect.height() / 2 + tolerance  # 半短轴 + 容差
+            if a == 0 or b == 0:
+                return False
+            # 计算点到椭圆中心的归一化距离
+            dx = pos.x() - center_x
+            dy = pos.y() - center_y
+            dist = (dx * dx) / (a * a) + (dy * dy) / (b * b)
+            # dist <= 1.0 表示在椭圆内
+            return dist <= 1.0
+
+        elif shape_type in ['arrow', 'line'] and len(data) == 2:
+            # 线段：检测点到线段的距离（线条较细，用更大的容差）
+            return self._point_to_line_distance(pos, data[0], data[1]) < tolerance * 1.5
+
+        elif shape_type == 'pen' and len(data) > 1:
+            # 笔画：检测点到任意线段的距离（用更大的容差）
+            for i in range(len(data) - 1):
+                if self._point_to_line_distance(pos, data[i], data[i + 1]) < tolerance * 1.5:
+                    return True
+            return False
+
+        return False
+
+    def _point_to_line_distance(self, point, line_start, line_end):
+        """计算点到线段的距离"""
+        px, py = point.x(), point.y()
+        x1, y1 = line_start.x(), line_start.y()
+        x2, y2 = line_end.x(), line_end.y()
+
+        # 线段长度的平方
+        line_len_sq = (x2 - x1) ** 2 + (y2 - y1) ** 2
+        if line_len_sq == 0:
+            # 线段退化为点
+            return math.sqrt((px - x1) ** 2 + (py - y1) ** 2)
+
+        # 计算投影参数 t
+        t = max(0, min(1, ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / line_len_sq))
+
+        # 投影点
+        proj_x = x1 + t * (x2 - x1)
+        proj_y = y1 + t * (y2 - y1)
+
+        # 返回距离
+        return math.sqrt((px - proj_x) ** 2 + (py - proj_y) ** 2)
+
+    def _get_shape_bounds(self, index):
+        """获取图形的边界矩形"""
+        shape_type, color, size, data = self.drawing_paths[index]
+
+        if shape_type == 'text' and len(data) == 2:
+            text_pos, text = data
+            font_metrics = QFontMetrics(QFont("", size))
+            text_width = font_metrics.horizontalAdvance(text)
+            text_height = font_metrics.height()
+            return QRect(text_pos.x(), text_pos.y() - text_height, text_width, text_height)
+
+        elif shape_type in ['rect', 'circle'] and len(data) == 2:
+            return QRect(data[0], data[1]).normalized()
+
+        elif shape_type in ['arrow', 'line'] and len(data) == 2:
+            return QRect(data[0], data[1]).normalized()
+
+        elif shape_type == 'pen' and len(data) > 0:
+            min_x = min(p.x() for p in data)
+            min_y = min(p.y() for p in data)
+            max_x = max(p.x() for p in data)
+            max_y = max(p.y() for p in data)
+            return QRect(min_x, min_y, max_x - min_x, max_y - min_y)
+
+        return QRect()
+
+    def _move_shape(self, index, new_pos):
+        """移动图形到新位置"""
+        if self.drag_start_pos is None:
+            return
+
+        shape_type, color, size, data = self.drawing_paths[index]
+        dx = new_pos.x() - self.drag_start_pos.x()
+        dy = new_pos.y() - self.drag_start_pos.y()
+
+        if shape_type == 'text' and len(data) == 2:
+            data[0] = QPoint(data[0].x() + dx, data[0].y() + dy)
+        elif shape_type in ['rect', 'circle', 'arrow', 'line'] and len(data) == 2:
+            data[0] = QPoint(data[0].x() + dx, data[0].y() + dy)
+            data[1] = QPoint(data[1].x() + dx, data[1].y() + dy)
+        elif shape_type == 'pen' and len(data) > 0:
+            data = [QPoint(p.x() + dx, p.y() + dy) for p in data]
+
+        self.drawing_paths[index] = (shape_type, color, size, data)
+        self.drag_start_pos = new_pos
+        self.update()
+
     def _show_text_input(self, pos):
-        """在指定位置显示文字输入框"""
-        from PyQt6.QtWidgets import QLineEdit
+        """在指定位置开始文字输入（无输入框模式）"""
+        # 如果正在输入，先提交
+        if self.text_editing:
+            self._commit_text_editing()
 
-        # 如果已有输入框，先提交
-        if self.text_input and self.text_input.isVisible():
-            self._commit_text_input()
+        self.text_editing = True
+        self.text_editing_pos = pos
+        self.text_editing_content = ""
+        self.cursor_visible = True
 
-        self.text_input_pos = pos
-        self.text_input = QLineEdit(self)
-        self.text_input.setGeometry(pos.x(), pos.y() - 30, 200, 30)
-        self.text_input.setStyleSheet("""
-            QLineEdit {
-                background: white;
-                border: 2px solid #007AFF;
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-size: 14px;
-            }
-        """)
-        self.text_input.setFocus()
-        self.text_input.show()
-        self.text_input.returnPressed.connect(self._commit_text_input)
+        # 启动光标闪烁定时器
+        if self.cursor_timer is None:
+            self.cursor_timer = QTimer(self)
+            self.cursor_timer.timeout.connect(self._toggle_cursor)
+        self.cursor_timer.start(500)  # 500ms 闪烁
+
+        self.update()
+
+    def _toggle_cursor(self):
+        """切换光标可见性"""
+        if self.text_editing:
+            self.cursor_visible = not self.cursor_visible
+            self.update()
+
+    def _commit_text_editing(self):
+        """提交当前输入的文字"""
+        if self.text_editing and self.text_editing_content:
+            self.drawing_paths.append((
+                'text',
+                self.current_color,
+                self.current_font_size,
+                [self.text_editing_pos, self.text_editing_content]
+            ))
+
+        # 停止光标闪烁
+        if self.cursor_timer:
+            self.cursor_timer.stop()
+
+        self.text_editing = False
+        self.text_editing_pos = None
+        self.text_editing_content = ""
+        self.update()
 
     def _commit_text_input(self):
         """提交文字输入"""
@@ -1231,6 +1555,10 @@ class ScreenshotOverlay(QWidget):
 
                 # 处理工具切换和参数面板
                 if new_tool is not None:
+                    # 切换工具前，提交正在输入的文字
+                    if self.text_editing:
+                        self._commit_text_editing()
+
                     if new_tool == old_tool and new_tool in tools_with_params:
                         # 点击同一个有参数的工具，切换面板显示状态
                         self.param_panel_open = not self.param_panel_open
@@ -1261,8 +1589,18 @@ class ScreenshotOverlay(QWidget):
                     # 点击画布区域，关闭参数面板
                     self.param_panel_open = False
 
+                    # 任何工具下，先检测是否点击了已有图形（文字工具除外，因为需要特殊处理）
+                    if self.current_tool != 'text':
+                        shape_index = self._get_shape_at_pos(event.pos())
+                        if shape_index is not None:
+                            # 开始拖拽图形
+                            self.dragging_shape_index = shape_index
+                            self.drag_start_pos = event.pos()
+                            self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+                            return
+
                     if self.current_tool == 'move':
-                        # 移动模式：开始拖拽选择框
+                        # 移动模式：没有点击图形时，移动选择框
                         self.is_moving = True
                         self.move_start_pos = event.pos()
                         # 移动选择框后，清除单窗口截图标记
@@ -1270,28 +1608,22 @@ class ScreenshotOverlay(QWidget):
                         self.selected_window_pixmap = None
                     elif self.current_tool == 'text':
                         # 文字模式
-                        # 如果有输入框正在显示，先处理它
-                        if self.text_input and self.text_input.isVisible():
-                            # 如果有内容则提交，否则关闭
-                            if self.text_input.text().strip():
-                                self._commit_text_input()
-                            else:
-                                self._close_text_input()
+                        # 如果正在输入文字，先提交
+                        if self.text_editing:
+                            self._commit_text_editing()
+                            # 如果点击的是同一位置附近，不再开启新输入
                             self.update()
                             return
 
-                        # 检查是否点击了已有文字
-                        text_index = self._get_text_at_pos(event.pos())
-                        if text_index is not None:
-                            # 开始拖拽文字
-                            self.dragging_text_index = text_index
-                            text_pos = self.drawing_paths[text_index][3][0]
-                            self.drag_offset = QPoint(
-                                event.pos().x() - text_pos.x(),
-                                event.pos().y() - text_pos.y()
-                            )
+                        # 检查是否点击了已有图形（包括文字）
+                        shape_index = self._get_shape_at_pos(event.pos())
+                        if shape_index is not None:
+                            # 开始拖拽图形
+                            self.dragging_shape_index = shape_index
+                            self.drag_start_pos = event.pos()
+                            self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
                         else:
-                            # 显示文字输入框添加新文字
+                            # 开始文字输入
                             self._show_text_input(event.pos())
                     else:
                         # 绘制模式
@@ -1319,6 +1651,19 @@ class ScreenshotOverlay(QWidget):
                 self.hovered_window_id = window_id
                 self.update()
 
+        # 编辑模式下，检测悬停在图形上（用于显示移动光标）- 任何工具下都可以
+        if self.edit_mode and not self.is_drawing and not self.is_moving and self.dragging_shape_index is None:
+            rect = self._get_selection_rect()
+            if rect.contains(event.pos()):
+                shape_index = self._get_shape_at_pos(event.pos())
+                if shape_index != self.hovered_shape_index:
+                    self.hovered_shape_index = shape_index
+                    if shape_index is not None:
+                        self.setCursor(QCursor(Qt.CursorShape.SizeAllCursor))
+                    else:
+                        self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+                    self.update()
+
         if self.is_selecting:
             self.end_pos = event.pos()
             self.update()
@@ -1330,17 +1675,9 @@ class ScreenshotOverlay(QWidget):
                 self.end_pos = self.end_pos + delta
                 self.move_start_pos = event.pos()
                 self.update()
-        elif self.dragging_text_index is not None:
-            # 拖拽文字
-            new_pos = QPoint(
-                event.pos().x() - self.drag_offset.x(),
-                event.pos().y() - self.drag_offset.y()
-            )
-            # 更新文字位置
-            shape_type, color, size, data = self.drawing_paths[self.dragging_text_index]
-            data[0] = new_pos
-            self.drawing_paths[self.dragging_text_index] = (shape_type, color, size, data)
-            self.update()
+        elif self.dragging_shape_index is not None:
+            # 拖拽图形
+            self._move_shape(self.dragging_shape_index, event.pos())
         elif self.is_drawing:
             if self.current_tool in ['pen', 'eraser']:
                 # 画笔/橡皮擦：记录所有移动点
@@ -1386,10 +1723,12 @@ class ScreenshotOverlay(QWidget):
                 self.is_moving = False
                 self.move_start_pos = None
                 self.update()
-            elif self.dragging_text_index is not None:
-                # 完成文字拖拽
-                self.dragging_text_index = None
-                self.drag_offset = None
+            elif self.dragging_shape_index is not None:
+                # 完成图形拖拽
+                self.dragging_shape_index = None
+                self.drag_start_pos = None
+                self.hovered_shape_index = None
+                self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
                 self.update()
             elif self.is_drawing:
                 # 完成绘制
@@ -1531,7 +1870,35 @@ class ScreenshotOverlay(QWidget):
         ]
 
     def keyPressEvent(self, event):
-        """按 ESC 取消截图"""
+        """处理键盘事件"""
+        # 如果正在输入文字
+        if self.text_editing:
+            key = event.key()
+
+            if key == Qt.Key.Key_Escape:
+                # ESC 取消输入
+                if self.cursor_timer:
+                    self.cursor_timer.stop()
+                self.text_editing = False
+                self.text_editing_content = ""
+                self.update()
+            elif key == Qt.Key.Key_Return or key == Qt.Key.Key_Enter:
+                # 回车确认输入
+                self._commit_text_editing()
+            elif key == Qt.Key.Key_Backspace:
+                # 退格删除
+                if self.text_editing_content:
+                    self.text_editing_content = self.text_editing_content[:-1]
+                    self.update()
+            else:
+                # 普通字符输入
+                text = event.text()
+                if text and text.isprintable():
+                    self.text_editing_content += text
+                    self.update()
+            return
+
+        # 非文字输入模式，ESC 取消截图
         if event.key() == Qt.Key.Key_Escape:
             self.close()
 
