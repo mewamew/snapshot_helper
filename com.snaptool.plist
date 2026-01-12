@@ -6,7 +6,7 @@
     <string>com.snaptool</string>
     <key>ProgramArguments</key>
     <array>
-        <string>__INSTALL_PATH__/venv/bin/python</string>
+        <string>__PYTHON_PATH__</string>
         <string>__INSTALL_PATH__/snap_tool.py</string>
     </array>
     <key>WorkingDirectory</key>
