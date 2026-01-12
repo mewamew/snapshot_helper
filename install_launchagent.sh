@@ -18,7 +18,7 @@ if [ -f "$LAUNCH_AGENTS_DIR/$PLIST_NAME" ]; then
     launchctl unload "$LAUNCH_AGENTS_DIR/$PLIST_NAME" 2>/dev/null
 fi
 
-# 检测真实的 Python 路径
+# 检测真实的 Python 路径（用于权限和 plist）
 VENV_PYTHON="$SCRIPT_DIR/venv/bin/python"
 if [ -L "$VENV_PYTHON" ]; then
     # 追踪符号链接找到真实的 Python 可执行文件
@@ -34,10 +34,17 @@ else
     PYTHON_EXEC="$VENV_PYTHON"
 fi
 
-echo "检测到 Python 路径: $PYTHON_EXEC"
+# 检测 venv 的 site-packages 路径
+VENV_SITE_PACKAGES=$("$VENV_PYTHON" -c "import site; print(site.getsitepackages()[0])")
 
-# 复制 plist 文件并替换路径占位符
-sed -e "s|__INSTALL_PATH__|$SCRIPT_DIR|g" -e "s|__PYTHON_PATH__|$PYTHON_EXEC|g" "$SCRIPT_DIR/$PLIST_NAME" > "$LAUNCH_AGENTS_DIR/$PLIST_NAME"
+echo "检测到 Python 路径: $PYTHON_EXEC"
+echo "检测到 site-packages: $VENV_SITE_PACKAGES"
+
+# 复制 plist 文件并替换所有占位符
+sed -e "s|__INSTALL_PATH__|$SCRIPT_DIR|g" \
+    -e "s|__PYTHON_PATH__|$PYTHON_EXEC|g" \
+    -e "s|__VENV_SITE_PACKAGES__|$VENV_SITE_PACKAGES|g" \
+    "$SCRIPT_DIR/$PLIST_NAME" > "$LAUNCH_AGENTS_DIR/$PLIST_NAME"
 
 # 加载服务
 launchctl load "$LAUNCH_AGENTS_DIR/$PLIST_NAME"

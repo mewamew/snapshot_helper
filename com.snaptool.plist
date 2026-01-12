@@ -9,6 +9,11 @@
         <string>__PYTHON_PATH__</string>
         <string>__INSTALL_PATH__/snap_tool.py</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>__VENV_SITE_PACKAGES__</string>
+    </dict>
     <key>WorkingDirectory</key>
     <string>__INSTALL_PATH__</string>
     <key>RunAtLoad</key>

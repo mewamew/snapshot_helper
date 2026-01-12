@@ -65,6 +65,20 @@ class ScreenshotOverlay(QWidget):
         self.dragging_text_index = None  # 正在拖拽的文字索引
         self.drag_offset = None  # 拖拽偏移量
 
+        # 参数面板状态
+        self.param_panel_open = False  # 参数面板是否打开
+        self.param_panel_rect = None   # 参数面板矩形区域
+        self.param_panel_items = []    # [(rect, type, value), ...] type: 'color'|'width'|'font_size'
+        self.current_tool_btn_rect = None  # 当前工具按钮的矩形（用于定位参数面板）
+
+        # 窗口检测状态（用于自动选中窗口）
+        self.detected_windows = []      # 检测到的窗口列表
+        self.hovered_window_rect = None # 当前悬停的窗口矩形
+        self.hovered_window_id = None   # 当前悬停的窗口ID
+        self.selected_window_id = None  # 选中的窗口ID（用于单窗口截图）
+        self.selected_window_pixmap = None  # 选中窗口的截图（用于编辑时显示）
+        self.last_window_refresh = 0    # 上次刷新窗口列表的时间
+
         geometry, mss_monitor, dpr, screen = screen_info
         self.screen = screen
         self.screen_geometry = geometry
@@ -92,6 +106,9 @@ class ScreenshotOverlay(QWidget):
         self.background_pixmap = self._capture_screen(mss_monitor)
 
         self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+
+        # 启用鼠标追踪（用于窗口悬停检测）
+        self.setMouseTracking(True)
 
     def _capture_screen(self, monitor):
         """截取指定显示器 - macOS 使用 Quartz 获取物理像素，其他平台用 mss"""
@@ -182,6 +199,141 @@ class ScreenshotOverlay(QWidget):
             if self.background_pixmap:
                 self.background_pixmap.setDevicePixelRatio(self.dpr)
 
+    def _refresh_windows(self):
+        """刷新屏幕上的窗口列表（macOS only）"""
+        import time
+        current_time = time.time()
+
+        # 限制刷新频率（200ms 一次）
+        if current_time - self.last_window_refresh < 0.2:
+            return
+        self.last_window_refresh = current_time
+
+        if sys.platform != 'darwin':
+            return
+
+        try:
+            from Quartz import (
+                CGWindowListCopyWindowInfo,
+                kCGWindowListOptionOnScreenOnly,
+                kCGWindowListExcludeDesktopElements,
+                kCGNullWindowID
+            )
+
+            # 获取屏幕上的窗口（排除桌面元素）
+            options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements
+            window_list = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
+
+            self.detected_windows = []
+            for win_info in window_list:
+                bounds = win_info.get('kCGWindowBounds', {})
+                width = bounds.get('Width', 0)
+                height = bounds.get('Height', 0)
+
+                # 跳过太小的窗口
+                if width < 50 or height < 50:
+                    continue
+
+                # 跳过自己的窗口
+                owner_pid = win_info.get('kCGWindowOwnerPID', 0)
+                if owner_pid == os.getpid():
+                    continue
+
+                window = {
+                    'id': win_info.get('kCGWindowNumber', 0),  # 窗口ID，用于单窗口截图
+                    'layer': win_info.get('kCGWindowLayer', 0),
+                    'name': win_info.get('kCGWindowName', ''),
+                    'owner': win_info.get('kCGWindowOwnerName', ''),
+                    'rect': QRect(
+                        int(bounds.get('X', 0)),
+                        int(bounds.get('Y', 0)),
+                        int(width),
+                        int(height)
+                    )
+                }
+                self.detected_windows.append(window)
+
+            # 注意：CGWindowListCopyWindowInfo 已按前后顺序返回窗口，无需排序
+
+        except Exception as e:
+            print(f"窗口检测失败: {e}")
+            self.detected_windows = []
+
+    def _get_window_at_pos(self, pos):
+        """获取指定位置的窗口矩形和ID，返回 (rect, window_id) 或 (None, None)"""
+        # 先刷新窗口列表
+        self._refresh_windows()
+
+        if not self.detected_windows:
+            return None, None
+
+        # 转换为屏幕绝对坐标
+        screen_pos = QPoint(
+            pos.x() + self.screen_geometry.x(),
+            pos.y() + self.screen_geometry.y()
+        )
+
+        # 按层级从高到低遍历（跳过 layer > 0 的系统窗口如菜单栏）
+        for window in self.detected_windows:
+            # 只匹配正常窗口（layer <= 0）
+            if window['layer'] > 0:
+                continue
+            if window['rect'].contains(screen_pos):
+                # 转换回窗口内坐标
+                window_rect = QRect(
+                    window['rect'].x() - self.screen_geometry.x(),
+                    window['rect'].y() - self.screen_geometry.y(),
+                    window['rect'].width(),
+                    window['rect'].height()
+                )
+                return window_rect, window['id']
+
+        return None, None
+
+    def _capture_single_window(self, window_id):
+        """截取单个窗口的图像（macOS only）"""
+        if sys.platform != 'darwin':
+            return None
+
+        try:
+            import Quartz
+            from Quartz import (
+                CGWindowListCreateImage, kCGWindowListOptionIncludingWindow,
+                kCGWindowImageBoundsIgnoreFraming, CGRectNull
+            )
+
+            # 使用 kCGWindowListOptionIncludingWindow 只截取指定窗口
+            # CGRectNull 表示截取整个窗口
+            cg_image = CGWindowListCreateImage(
+                CGRectNull,
+                kCGWindowListOptionIncludingWindow,
+                window_id,
+                kCGWindowImageBoundsIgnoreFraming
+            )
+
+            if cg_image is None:
+                return None
+
+            # 获取图像尺寸
+            width = Quartz.CGImageGetWidth(cg_image)
+            height = Quartz.CGImageGetHeight(cg_image)
+            bytes_per_row = Quartz.CGImageGetBytesPerRow(cg_image)
+
+            # 转换为 QPixmap
+            from Quartz import CGImageGetDataProvider, CGDataProviderCopyData
+            data_provider = CGImageGetDataProvider(cg_image)
+            data = CGDataProviderCopyData(data_provider)
+
+            qimg = QImage(data, width, height, bytes_per_row, QImage.Format.Format_ARGB32)
+            pixmap = QPixmap.fromImage(qimg.copy())
+            pixmap.setDevicePixelRatio(self.dpr)
+
+            return pixmap
+
+        except Exception as e:
+            print(f"单窗口截图失败: {e}")
+            return None
+
     def _post_show_sync(self):
         """窗口尺寸稳定后重新校准 DPR（修复 macOS 全屏缩放导致的偏差）"""
         if not self.background_pixmap:
@@ -225,12 +377,26 @@ class ScreenshotOverlay(QWidget):
         # 绘制半透明遮罩
         painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
 
+        # 绘制窗口高亮边框（选择前）
+        if self.hovered_window_rect and not self.edit_mode:
+            # 先清除窗口区域的遮罩
+            if self.background_pixmap:
+                src_rect = self._rect_to_screen_pixels(self.hovered_window_rect)
+                painter.drawPixmap(self.hovered_window_rect, self.background_pixmap, src_rect)
+            # 绘制高亮边框
+            painter.setPen(QPen(QColor(0, 200, 83), 3))  # 绿色边框
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(self.hovered_window_rect)
+
         # 如果正在选择，绘制选择区域
         if self.start_pos and self.end_pos:
             rect = self._get_selection_rect()
 
             # 清除选择区域的遮罩，显示原始截图
-            if self.background_pixmap:
+            if self.selected_window_pixmap:
+                # 使用单窗口截图显示（窗口选择模式）
+                painter.drawPixmap(rect, self.selected_window_pixmap)
+            elif self.background_pixmap:
                 # 计算源矩形（考虑 DPI 缩放）
                 src_rect = self._rect_to_screen_pixels(rect)
                 painter.drawPixmap(rect, self.background_pixmap, src_rect)
@@ -464,10 +630,8 @@ class ScreenshotOverlay(QWidget):
         padding = 12
         separator_width = 8  # 分隔线占用的宽度
 
-        # 动态计算按钮数量：文字工具时显示字体大小按钮（+3个）
-        base_btn_count = 17  # 基础按钮数量（含直线工具）
-        font_size_btn_count = 3 if self.current_tool == 'text' else 0
-        total_btn_count = base_btn_count + font_size_btn_count
+        # 按钮数量：8个工具 + 1撤销 + 2操作按钮 = 11个
+        total_btn_count = 11
 
         # 计算工具栏总宽度
         toolbar_width = (btn_size * total_btn_count) + (spacing * (total_btn_count - 1)) + (separator_width * 2) + (padding * 2)
@@ -480,6 +644,13 @@ class ScreenshotOverlay(QWidget):
         # 如果超出屏幕底部，则显示在选择框上方
         if toolbar_y + toolbar_height > self.height():
             toolbar_y = rect.top() - toolbar_height - 15
+
+        # 如果超出屏幕左侧边界，调整到左侧边缘
+        if toolbar_x < 5:
+            toolbar_x = 5
+        # 如果超出屏幕右侧边界，调整到右侧边缘
+        if toolbar_x + toolbar_width > self.width() - 5:
+            toolbar_x = self.width() - toolbar_width - 5
 
         # 绘制工具栏背景（圆角白色卡片，带阴影）
         toolbar_rect = QRect(toolbar_x, toolbar_y, toolbar_width, toolbar_height)
@@ -540,43 +711,24 @@ class ScreenshotOverlay(QWidget):
         self._draw_tool_button(painter, eraser_btn, "⌫", self.current_tool == 'eraser')
         current_x += btn_size + spacing
 
-        # 6. 文字工具
+        # 8. 文字工具
         text_btn = QRect(current_x, toolbar_y + padding, btn_size, btn_size)
         self.text_btn_rect = text_btn
         self._draw_tool_button(painter, text_btn, "A", self.current_tool == 'text')
         current_x += btn_size + spacing
 
-        # 7-9. 字体大小选择（仅文字工具时显示）
-        self.font_size_btn_rects = []
-        if self.current_tool == 'text':
-            font_sizes = [(14, "S"), (20, "M"), (28, "L")]
-            for size, label in font_sizes:
-                font_btn = QRect(current_x, toolbar_y + padding, btn_size, btn_size)
-                self.font_size_btn_rects.append((font_btn, size))
-                is_selected = (self.current_font_size == size)
-                self._draw_font_size_button(painter, font_btn, label, is_selected, True)
-                current_x += btn_size + spacing
-
-        # 10-12. 颜色选择（红、绿、蓝）
-        colors = [QColor(255, 60, 60), QColor(76, 217, 100), QColor(0, 122, 255)]
-        self.color_btn_rects = []
-        for color in colors:
-            color_btn = QRect(current_x, toolbar_y + padding, btn_size, btn_size)
-            self.color_btn_rects.append((color_btn, color))
-            is_selected = (self.current_color.red() == color.red() and
-                          self.current_color.green() == color.green() and
-                          self.current_color.blue() == color.blue())
-            self._draw_color_button(painter, color_btn, color, is_selected)
-            current_x += btn_size + spacing
-
-        # 9-11. 笔触粗细
-        widths = [2, 4, 6]
-        self.width_btn_rects = []
-        for width in widths:
-            width_btn = QRect(current_x, toolbar_y + padding, btn_size, btn_size)
-            self.width_btn_rects.append((width_btn, width))
-            self._draw_width_button(painter, width_btn, width, self.current_width == width)
-            current_x += btn_size + spacing
+        # 记录当前工具按钮的位置（用于定位参数面板）
+        tool_btn_map = {
+            'move': self.move_btn_rect,
+            'rect': self.rect_btn_rect,
+            'circle': self.circle_btn_rect,
+            'pen': self.pen_btn_rect,
+            'arrow': self.arrow_btn_rect,
+            'line': self.line_btn_rect,
+            'eraser': self.eraser_btn_rect,
+            'text': self.text_btn_rect,
+        }
+        self.current_tool_btn_rect = tool_btn_map.get(self.current_tool)
 
         # 第一个分隔线
         painter.setPen(QPen(QColor(200, 200, 200), 1))
@@ -612,6 +764,111 @@ class ScreenshotOverlay(QWidget):
         confirm_btn = QRect(current_x, toolbar_y + padding, btn_size, btn_size)
         self.confirm_btn_rect = confirm_btn
         self._draw_action_button(painter, confirm_btn, "✓", QColor(52, 199, 89))
+
+        # 绘制参数面板（如果打开）
+        self._draw_param_panel(painter)
+
+    def _draw_param_panel(self, painter):
+        """绘制当前工具的参数面板"""
+        # 判断当前工具是否需要参数面板
+        tools_with_color_width = ['rect', 'circle', 'pen', 'arrow', 'line']
+        tools_with_color_fontsize = ['text']
+
+        if self.current_tool not in tools_with_color_width + tools_with_color_fontsize:
+            self.param_panel_open = False
+            return
+
+        if not self.param_panel_open or not self.current_tool_btn_rect:
+            return
+
+        # 参数面板尺寸
+        btn_size = 36
+        spacing = 6
+        padding = 10
+
+        # 根据工具类型决定面板内容
+        if self.current_tool in tools_with_color_width:
+            # 颜色 + 线宽
+            colors = [QColor(255, 60, 60), QColor(76, 217, 100), QColor(0, 122, 255)]
+            widths = [2, 4, 6]
+            item_count = len(colors) + len(widths) + 1  # +1 是分隔线
+        else:
+            # 颜色 + 字体大小
+            colors = [QColor(255, 60, 60), QColor(76, 217, 100), QColor(0, 122, 255)]
+            font_sizes = [(14, "S"), (20, "M"), (28, "L")]
+            item_count = len(colors) + len(font_sizes) + 1
+
+        # 计算面板尺寸
+        panel_width = (btn_size * item_count) + (spacing * (item_count - 1)) + (padding * 2) - btn_size // 2
+        panel_height = btn_size + padding * 2
+
+        # 面板位置：工具按钮正下方（下拉）
+        tool_btn_center_x = self.current_tool_btn_rect.center().x()
+        panel_x = tool_btn_center_x - panel_width // 2
+        panel_y = self.current_tool_btn_rect.bottom() + 8
+
+        # 边界检查
+        if panel_x < 5:
+            panel_x = 5
+        if panel_x + panel_width > self.width() - 5:
+            panel_x = self.width() - panel_width - 5
+        if panel_y + panel_height > self.height() - 5:
+            # 如果下方空间不足，显示在按钮上方
+            panel_y = self.current_tool_btn_rect.top() - panel_height - 8
+
+        # 保存面板矩形
+        self.param_panel_rect = QRect(panel_x, panel_y, panel_width, panel_height)
+
+        # 绘制阴影
+        shadow_offset = 2
+        shadow_rect = self.param_panel_rect.adjusted(shadow_offset, shadow_offset, shadow_offset, shadow_offset)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 50))
+        painter.drawRoundedRect(shadow_rect, 8, 8)
+
+        # 绘制面板背景
+        painter.setBrush(QColor(255, 255, 255, 250))
+        painter.drawRoundedRect(self.param_panel_rect, 8, 8)
+
+        # 绘制面板内容
+        current_x = panel_x + padding
+        self.param_panel_items = []
+
+        # 绘制颜色选项
+        for color in colors:
+            color_rect = QRect(current_x, panel_y + padding, btn_size, btn_size)
+            is_selected = (self.current_color.red() == color.red() and
+                          self.current_color.green() == color.green() and
+                          self.current_color.blue() == color.blue())
+            self._draw_color_button(painter, color_rect, color, is_selected)
+            self.param_panel_items.append((color_rect, 'color', color))
+            current_x += btn_size + spacing
+
+        # 绘制分隔线
+        painter.setPen(QPen(QColor(200, 200, 200), 1))
+        line_x = current_x - spacing // 2
+        painter.drawLine(
+            line_x, panel_y + padding + 6,
+            line_x, panel_y + padding + btn_size - 6
+        )
+        current_x += spacing
+
+        # 根据工具类型绘制第二组选项
+        if self.current_tool in tools_with_color_width:
+            # 绘制线宽选项
+            for width in widths:
+                width_rect = QRect(current_x, panel_y + padding, btn_size, btn_size)
+                self._draw_width_button(painter, width_rect, width, self.current_width == width)
+                self.param_panel_items.append((width_rect, 'width', width))
+                current_x += btn_size + spacing
+        else:
+            # 绘制字体大小选项
+            for size, label in font_sizes:
+                font_rect = QRect(current_x, panel_y + padding, btn_size, btn_size)
+                is_selected = (self.current_font_size == size)
+                self._draw_font_size_button(painter, font_rect, label, is_selected, True)
+                self.param_panel_items.append((font_rect, 'font_size', size))
+                current_x += btn_size + spacing
 
     def _draw_tool_button(self, painter, rect, text, is_selected):
         """绘制工具按钮"""
@@ -920,62 +1177,72 @@ class ScreenshotOverlay(QWidget):
                     self.close()
                     return
 
+                # 首先检查参数面板内的选项
+                if self.param_panel_open and self.param_panel_items:
+                    for item_rect, item_type, item_value in self.param_panel_items:
+                        if item_rect.contains(event.pos()):
+                            if item_type == 'color':
+                                self.current_color = item_value
+                            elif item_type == 'width':
+                                self.current_width = item_value
+                            elif item_type == 'font_size':
+                                self.current_font_size = item_value
+                            self.update()
+                            return
+
+                # 定义需要参数面板的工具
+                tools_with_params = ['rect', 'circle', 'pen', 'arrow', 'line', 'text']
+
                 # 检查工具选择按钮
+                old_tool = self.current_tool
+                new_tool = None
+
                 if hasattr(self, 'move_btn_rect') and self.move_btn_rect.contains(event.pos()):
-                    self.current_tool = 'move'
+                    new_tool = 'move'
                     clicked_button = True
 
                 if hasattr(self, 'pen_btn_rect') and self.pen_btn_rect.contains(event.pos()):
-                    self.current_tool = 'pen'
+                    new_tool = 'pen'
                     clicked_button = True
 
                 if hasattr(self, 'rect_btn_rect') and self.rect_btn_rect.contains(event.pos()):
-                    self.current_tool = 'rect'
+                    new_tool = 'rect'
                     clicked_button = True
 
                 if hasattr(self, 'circle_btn_rect') and self.circle_btn_rect.contains(event.pos()):
-                    self.current_tool = 'circle'
+                    new_tool = 'circle'
                     clicked_button = True
 
                 if hasattr(self, 'arrow_btn_rect') and self.arrow_btn_rect.contains(event.pos()):
-                    self.current_tool = 'arrow'
+                    new_tool = 'arrow'
                     clicked_button = True
 
                 if hasattr(self, 'line_btn_rect') and self.line_btn_rect.contains(event.pos()):
-                    self.current_tool = 'line'
+                    new_tool = 'line'
                     clicked_button = True
 
                 if hasattr(self, 'eraser_btn_rect') and self.eraser_btn_rect.contains(event.pos()):
-                    self.current_tool = 'eraser'
+                    new_tool = 'eraser'
                     clicked_button = True
 
                 if hasattr(self, 'text_btn_rect') and self.text_btn_rect.contains(event.pos()):
-                    self.current_tool = 'text'
+                    new_tool = 'text'
                     clicked_button = True
 
-                # 检查字体大小按钮
-                if hasattr(self, 'font_size_btn_rects'):
-                    for btn_rect, size in self.font_size_btn_rects:
-                        if btn_rect.contains(event.pos()):
-                            self.current_font_size = size
-                            clicked_button = True
-                            break
-
-                # 检查颜色选择按钮
-                if hasattr(self, 'color_btn_rects'):
-                    for btn_rect, color in self.color_btn_rects:
-                        if btn_rect.contains(event.pos()):
-                            self.current_color = color
-                            clicked_button = True
-                            break
-
-                # 检查笔触粗细按钮
-                if hasattr(self, 'width_btn_rects'):
-                    for btn_rect, width in self.width_btn_rects:
-                        if btn_rect.contains(event.pos()):
-                            self.current_width = width
-                            clicked_button = True
-                            break
+                # 处理工具切换和参数面板
+                if new_tool is not None:
+                    if new_tool == old_tool and new_tool in tools_with_params:
+                        # 点击同一个有参数的工具，切换面板显示状态
+                        self.param_panel_open = not self.param_panel_open
+                    else:
+                        # 切换到新工具
+                        self.current_tool = new_tool
+                        if new_tool in tools_with_params:
+                            # 新工具有参数，打开面板
+                            self.param_panel_open = True
+                        else:
+                            # 新工具没有参数，关闭面板
+                            self.param_panel_open = False
 
                 # 检查撤回按钮
                 if hasattr(self, 'undo_btn_rect') and self.undo_btn_rect.contains(event.pos()):
@@ -991,10 +1258,16 @@ class ScreenshotOverlay(QWidget):
                 # 在选择区域内开始绘制或移动
                 rect = self._get_selection_rect()
                 if rect.contains(event.pos()):
+                    # 点击画布区域，关闭参数面板
+                    self.param_panel_open = False
+
                     if self.current_tool == 'move':
                         # 移动模式：开始拖拽选择框
                         self.is_moving = True
                         self.move_start_pos = event.pos()
+                        # 移动选择框后，清除单窗口截图标记
+                        self.selected_window_id = None
+                        self.selected_window_pixmap = None
                     elif self.current_tool == 'text':
                         # 文字模式
                         # 如果有输入框正在显示，先处理它
@@ -1038,6 +1311,14 @@ class ScreenshotOverlay(QWidget):
 
     def mouseMoveEvent(self, event):
         """鼠标移动更新选择区域、涂鸦或移动选择框"""
+        # 未开始选择时，检测悬停的窗口
+        if not self.edit_mode and not self.is_selecting:
+            window_rect, window_id = self._get_window_at_pos(event.pos())
+            if window_rect != self.hovered_window_rect:
+                self.hovered_window_rect = window_rect
+                self.hovered_window_id = window_id
+                self.update()
+
         if self.is_selecting:
             self.end_pos = event.pos()
             self.update()
@@ -1082,7 +1363,20 @@ class ScreenshotOverlay(QWidget):
 
                 rect = self._get_selection_rect()
                 if rect.width() > 5 and rect.height() > 5:
+                    # 拖拽选择了足够大的区域
                     self.edit_mode = True
+                    self.hovered_window_rect = None  # 清除窗口高亮
+                    self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+                elif self.hovered_window_rect:
+                    # 单击且有悬停窗口，选中整个窗口
+                    self.start_pos = self.hovered_window_rect.topLeft()
+                    self.end_pos = self.hovered_window_rect.bottomRight()
+                    self.selected_window_id = self.hovered_window_id  # 保存窗口ID用于单窗口截图
+                    # 立即截取窗口内容用于编辑时显示
+                    self.selected_window_pixmap = self._capture_single_window(self.hovered_window_id)
+                    self.edit_mode = True
+                    self.hovered_window_rect = None  # 清除窗口高亮
+                    self.hovered_window_id = None
                     self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
                 else:
                     self.close()
@@ -1261,25 +1555,10 @@ class ScreenshotOverlay(QWidget):
                         clicked_on_toolbar = True
                         break
 
-            # 检查颜色和粗细按钮
-            if not clicked_on_toolbar:
-                if hasattr(self, 'color_btn_rects'):
-                    for btn_rect, _ in self.color_btn_rects:
-                        if btn_rect.contains(event.pos()):
-                            clicked_on_toolbar = True
-                            break
-
-                if hasattr(self, 'width_btn_rects') and not clicked_on_toolbar:
-                    for btn_rect, _ in self.width_btn_rects:
-                        if btn_rect.contains(event.pos()):
-                            clicked_on_toolbar = True
-                            break
-
-                if hasattr(self, 'font_size_btn_rects') and not clicked_on_toolbar:
-                    for btn_rect, _ in self.font_size_btn_rects:
-                        if btn_rect.contains(event.pos()):
-                            clicked_on_toolbar = True
-                            break
+            # 检查参数面板
+            if not clicked_on_toolbar and self.param_panel_open:
+                if self.param_panel_rect and self.param_panel_rect.contains(event.pos()):
+                    clicked_on_toolbar = True
 
             # 如果不是点击在工具栏上，则保存截图
             if not clicked_on_toolbar:
@@ -1300,10 +1579,24 @@ class ScreenshotOverlay(QWidget):
         filename = f"screenshot_{timestamp}.png"
         filepath = temp_dir / filename
 
-        # 从背景截图中裁剪选择区域（使用物理像素坐标）
-        if self.background_pixmap:
+        # 如果是单窗口选择，使用已截取的窗口截图
+        if self.selected_window_pixmap:
+            cropped = self.selected_window_pixmap.copy()
+        elif self.selected_window_id:
+            # 备用：重新截取单窗口
+            cropped = self._capture_single_window(self.selected_window_id)
+            if cropped is None:
+                # 单窗口截图失败，回退到屏幕截图
+                src_rect = self._rect_to_screen_pixels(rect)
+                cropped = self.background_pixmap.copy(src_rect)
+        elif self.background_pixmap:
+            # 从背景截图中裁剪选择区域（使用物理像素坐标）
             src_rect = self._rect_to_screen_pixels(rect)
             cropped = self.background_pixmap.copy(src_rect)
+        else:
+            return
+
+        if cropped:
 
             # 如果有涂鸦，将涂鸦绘制到截图上
             # 注意：cropped 继承了 background_pixmap 的 devicePixelRatio
