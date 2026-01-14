@@ -2290,13 +2290,6 @@ class SnapTool(QApplication):
 
     def _on_hotkey_triggered(self):
         """热键触发时启动截图"""
-        # macOS: 先激活应用，确保事件循环正常工作
-        if sys.platform == 'darwin':
-            try:
-                from AppKit import NSApplication
-                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-            except ImportError:
-                pass
         # 使用 QTimer 确保在主线程执行
         QTimer.singleShot(0, self._start_screenshot)
         # 强制处理事件
@@ -2363,14 +2356,6 @@ class SnapTool(QApplication):
         """开始截图"""
         if self.overlay and self.overlay.isVisible():
             return
-
-        # macOS: 强制激活应用到前台，确保窗口能正确显示
-        if sys.platform == 'darwin':
-            try:
-                from AppKit import NSApplication
-                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-            except ImportError:
-                pass
 
         screen_info = self._get_current_screen_info()
         self.overlay = ScreenshotOverlay(self._on_capture_done, screen_info)
