@@ -2226,6 +2226,7 @@ class SnapTool(QApplication):
 
                 if ctrl_pressed and keycode == 0:  # Ctrl + A
                     self.hotkey_signal.triggered.emit()
+                    return None  # 阻止事件继续传递，避免触发其他应用的 Ctrl+A 行为
 
             return event
 
