@@ -8,6 +8,8 @@ import sys
 import os
 import ctypes
 import math
+import tempfile
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -22,7 +24,7 @@ if sys.platform == 'win32':
             pass
 
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QSystemTrayIcon, QMenu
+    QApplication, QWidget, QSystemTrayIcon, QMenu, QFileDialog
 )
 from PyQt6.QtCore import Qt, QRect, QPoint, pyqtSignal, QObject, QTimer
 from PyQt6.QtGui import (
@@ -31,6 +33,44 @@ from PyQt6.QtGui import (
 )
 from pynput import keyboard
 import mss
+
+
+LOG_DIR = Path(tempfile.gettempdir()) / "snaptool_logs"
+LOG_FILE = LOG_DIR / "snaptool.log"
+
+
+def _write_log(text):
+    try:
+        LOG_DIR.mkdir(exist_ok=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(text)
+    except Exception:
+        pass
+
+
+def _log_exception(prefix, exc_info=None):
+    try:
+        if exc_info is None:
+            exc_info = sys.exc_info()
+        exc_type, exc_value, exc_tb = exc_info
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        lines = [f"[{ts}] {prefix}\n"]
+        if exc_type is not None:
+            lines.extend(traceback.format_exception(exc_type, exc_value, exc_tb))
+        _write_log("".join(lines))
+    except Exception:
+        pass
+
+
+def _excepthook(exc_type, exc_value, exc_tb):
+    _log_exception("Uncaught exception", (exc_type, exc_value, exc_tb))
+    try:
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+    except Exception:
+        pass
+
+
+sys.excepthook = _excepthook
 
 
 class HotkeySignal(QObject):
@@ -166,28 +206,35 @@ class ScreenshotOverlay(QWidget):
 
         except ImportError:
             return self._capture_screen_mss(monitor)
+        except Exception:
+            _log_exception("Quartz capture failed")
+            return self._capture_screen_mss(monitor)
 
     def _capture_screen_mss(self, monitor):
         """使用 mss 截取屏幕（fallback）"""
-        with mss.mss() as sct:
-            screenshot = sct.grab(monitor)
+        try:
+            with mss.mss() as sct:
+                screenshot = sct.grab(monitor)
 
-            # 根据实际截图尺寸校准 DPR
-            self._sync_dpr_with_capture(screenshot.width, screenshot.height)
+                # 根据实际截图尺寸校准 DPR
+                self._sync_dpr_with_capture(screenshot.width, screenshot.height)
 
-            # mss 返回 BGRA
-            qimg = QImage(
-                screenshot.bgra,
-                screenshot.width,
-                screenshot.height,
-                screenshot.width * 4,
-                QImage.Format.Format_ARGB32
-            )
+                # mss 返回 BGRA
+                qimg = QImage(
+                    screenshot.bgra,
+                    screenshot.width,
+                    screenshot.height,
+                    screenshot.width * 4,
+                    QImage.Format.Format_ARGB32
+                )
 
-            pixmap = QPixmap.fromImage(qimg.copy())
-            # 设置 DPR，让 Qt 按逻辑坐标绘制（与 macOS Quartz 行为一致）
-            pixmap.setDevicePixelRatio(self.dpr)
-            return pixmap
+                pixmap = QPixmap.fromImage(qimg.copy())
+                # 设置 DPR，让 Qt 按逻辑坐标绘制（与 macOS Quartz 行为一致）
+                pixmap.setDevicePixelRatio(self.dpr)
+                return pixmap
+        except Exception:
+            _log_exception("MSS capture failed")
+            return None
 
     def _sync_dpr_with_capture(self, pixel_width, pixel_height):
         """用实际截图像素尺寸校准逻辑坐标与像素的比例"""
@@ -804,8 +851,8 @@ class ScreenshotOverlay(QWidget):
         padding = 12
         separator_width = 8  # 分隔线占用的宽度
 
-        # 按钮数量：8个工具 + 1撤销 + 2操作按钮 = 11个
-        total_btn_count = 11
+        # 按钮数量：8个工具 + 1撤销 + 3操作按钮 = 12个
+        total_btn_count = 12
 
         # 计算工具栏总宽度
         toolbar_width = (btn_size * total_btn_count) + (spacing * (total_btn_count - 1)) + (separator_width * 2) + (padding * 2)
@@ -934,7 +981,13 @@ class ScreenshotOverlay(QWidget):
         self._draw_action_button(painter, cancel_btn, "✕", QColor(255, 59, 48))
         current_x += btn_size + spacing
 
-        # 14. 确定按钮
+        # 14. 下载按钮
+        download_btn = QRect(current_x, toolbar_y + padding, btn_size, btn_size)
+        self.download_btn_rect = download_btn
+        self._draw_action_button(painter, download_btn, "↓", QColor(0, 122, 255))
+        current_x += btn_size + spacing
+
+        # 15. 确定按钮
         confirm_btn = QRect(current_x, toolbar_y + padding, btn_size, btn_size)
         self.confirm_btn_rect = confirm_btn
         self._draw_action_button(painter, confirm_btn, "✓", QColor(52, 199, 89))
@@ -1493,6 +1546,14 @@ class ScreenshotOverlay(QWidget):
                     self.close()
                     return
 
+                # 检查下载按钮
+                if hasattr(self, 'download_btn_rect') and self.download_btn_rect.contains(event.pos()):
+                    rect = self._get_selection_rect()
+                    if rect.width() > 5 and rect.height() > 5:
+                        if self._save_screenshot_as(rect):
+                            self.close()
+                    return
+
                 # 检查确定按钮
                 if hasattr(self, 'confirm_btn_rect') and self.confirm_btn_rect.contains(event.pos()):
                     rect = self._get_selection_rect()
@@ -1910,7 +1971,7 @@ class ScreenshotOverlay(QWidget):
 
             # 检查所有工具栏按钮
             toolbar_buttons = [
-                'cancel_btn_rect', 'confirm_btn_rect', 'pen_btn_rect',
+                'cancel_btn_rect', 'download_btn_rect', 'confirm_btn_rect', 'pen_btn_rect',
                 'rect_btn_rect', 'circle_btn_rect', 'arrow_btn_rect',
                 'line_btn_rect', 'eraser_btn_rect', 'text_btn_rect', 'undo_btn_rect'
             ]
@@ -1936,7 +1997,6 @@ class ScreenshotOverlay(QWidget):
 
     def _save_screenshot(self, rect):
         """保存截图到临时目录（包含涂鸦）"""
-        import tempfile
         # 获取系统临时目录
         temp_dir = Path(tempfile.gettempdir()) / "screenshots"
         temp_dir.mkdir(exist_ok=True)
@@ -1946,6 +2006,35 @@ class ScreenshotOverlay(QWidget):
         filename = f"screenshot_{timestamp}.png"
         filepath = temp_dir / filename
 
+        self._save_screenshot_to_path(rect, filepath)
+
+    def _save_screenshot_as(self, rect):
+        """保存截图到指定位置（包含涂鸦）"""
+        # 生成默认文件名
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"screenshot_{timestamp}.png"
+
+        default_dir = Path.home()
+        default_path = default_dir / filename
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "保存截图",
+            str(default_path),
+            "PNG Files (*.png)"
+        )
+
+        if not file_path:
+            return False
+
+        # 确保有 .png 后缀
+        if not file_path.lower().endswith(".png"):
+            file_path = f"{file_path}.png"
+
+        return self._save_screenshot_to_path(rect, Path(file_path))
+
+    def _save_screenshot_to_path(self, rect, filepath):
+        """保存截图到指定路径，并写入剪贴板"""
         # 如果是单窗口选择，使用已截取的窗口截图
         if self.selected_window_pixmap:
             cropped = self.selected_window_pixmap.copy()
@@ -1961,7 +2050,7 @@ class ScreenshotOverlay(QWidget):
             src_rect = self._rect_to_screen_pixels(rect)
             cropped = self.background_pixmap.copy(src_rect)
         else:
-            return
+            return False
 
         if cropped:
 
@@ -2076,6 +2165,9 @@ class ScreenshotOverlay(QWidget):
 
             # 通知回调
             self.on_capture_done(str(filepath))
+            return True
+
+        return False
 
     def showEvent(self, event):
         """显示时激活窗口"""
@@ -2098,6 +2190,7 @@ class SnapTool(QApplication):
         super().__init__(argv)
 
         self.setQuitOnLastWindowClosed(False)
+        self.aboutToQuit.connect(self._cleanup)
 
         # macOS: 隐藏 Dock 图标，只显示托盘图标
         if sys.platform == 'darwin':
@@ -2172,19 +2265,21 @@ class SnapTool(QApplication):
         hotkey_text = "Ctrl+A" if sys.platform == 'darwin' else "Shift+Alt+B"
 
         # 创建托盘菜单
-        menu = QMenu()
+        # QMenu 需要 QWidget 父对象，QSystemTrayIcon 不是 QWidget
+        # 作为成员变量持有即可避免被 GC 回收导致崩溃
+        self.tray_menu = QMenu()
 
         screenshot_action = QAction(f"截图 ({hotkey_text})", self)
         screenshot_action.triggered.connect(self._start_screenshot)
-        menu.addAction(screenshot_action)
+        self.tray_menu.addAction(screenshot_action)
 
-        menu.addSeparator()
+        self.tray_menu.addSeparator()
 
         quit_action = QAction("退出", self)
         quit_action.triggered.connect(self.quit)
-        menu.addAction(quit_action)
+        self.tray_menu.addAction(quit_action)
 
-        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.setContextMenu(self.tray_menu)
         self.tray_icon.setToolTip(f"截屏工具 - {hotkey_text}")
         self.tray_icon.show()
 
@@ -2302,9 +2397,13 @@ class SnapTool(QApplication):
 
         # 使用 mss 获取显示器信息
         # 注意：Mac 上 mss.monitors 返回逻辑像素坐标，Windows 上返回物理像素坐标
-        with mss.mss() as sct:
-            # monitors[0] 是所有显示器的组合，monitors[1:] 是各个显示器
-            monitors = sct.monitors[1:]
+        try:
+            with mss.mss() as sct:
+                # monitors[0] 是所有显示器的组合，monitors[1:] 是各个显示器
+                monitors = sct.monitors[1:]
+        except Exception:
+            _log_exception("Get mss monitors failed")
+            monitors = []
 
         # 找到鼠标所在的 Qt 屏幕
         screens = QGuiApplication.screens()
@@ -2358,14 +2457,34 @@ class SnapTool(QApplication):
         if self.overlay and self.overlay.isVisible():
             return
 
-        screen_info = self._get_current_screen_info()
-        self.overlay = ScreenshotOverlay(self._on_capture_done, screen_info)
+        # macOS: 强制激活应用到前台，确保窗口能正确显示
         if sys.platform == 'darwin':
-            self.overlay.show()
-            self.overlay.raise_()
-            self.overlay.activateWindow()
-        else:
-            self.overlay.showFullScreen()
+            try:
+                from AppKit import NSApplication
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            except ImportError:
+                pass
+
+        try:
+            screen_info = self._get_current_screen_info()
+            self.overlay = ScreenshotOverlay(self._on_capture_done, screen_info)
+            if sys.platform == 'darwin':
+                self.overlay.show()
+                self.overlay.raise_()
+                self.overlay.activateWindow()
+            else:
+                self.overlay.showFullScreen()
+        except Exception:
+            _log_exception("Start screenshot failed")
+            try:
+                self.tray_icon.showMessage(
+                    "截图失败",
+                    f"无法初始化截图层，请查看日志：{LOG_FILE}",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    3000
+                )
+            except Exception:
+                pass
 
     def _on_capture_done(self, filepath):
         """截图完成回调"""
@@ -2375,6 +2494,14 @@ class SnapTool(QApplication):
             QSystemTrayIcon.MessageIcon.Information,
             3000
         )
+
+    def _cleanup(self):
+        """退出前清理资源"""
+        if hasattr(self, "keyboard_listener"):
+            try:
+                self.keyboard_listener.stop()
+            except Exception:
+                _log_exception("Stop keyboard listener failed")
 
 
 def main():
