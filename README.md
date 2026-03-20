@@ -1,107 +1,161 @@
-# SnapTool - 跨平台截屏工具
+# SnapTool - 截屏标注工具
 
-一款轻量级的截屏工具，支持 macOS 和 Windows，具备全局热键快速截图、区域选择和图像标注功能。
+一款轻量级截屏工具，支持 macOS 和 Windows，可快速截图并添加标注。
 
 ## 功能特性
 
-- **全局热键触发**:
-  - macOS: `Ctrl+A`
-  - Windows: `Shift+Alt+B`
+- **全局热键快速截图**
+  - macOS: `Ctrl + A`
+  - Windows: `Shift + Alt + B`
 - **区域选择**: 鼠标框选需要截取的屏幕区域
-- **图像标注**: 支持在截图上进行涂鸦、画矩形、圆形、箭头等标注
-- **多种工具**:
-  - 自由画笔
-  - 矩形标注
-  - 圆形标注
-  - 箭头标注（拖动控制方向和长度）
-  - 橡皮擦（可擦除特定区域的标注）
-  - 3 种颜色选择（红、绿、蓝）
-  - 3 种笔触粗细
-  - 撤回功能（撤销上一步操作）
-- **自动保存**: 截图自动保存到系统临时目录
-- **剪贴板集成**: 截图和文件路径自动复制到剪贴板，可直接粘贴
-- **快捷确认**: 支持双击鼠标左键快速确认保存截图
-- **系统托盘运行**: 最小化到系统托盘，不占用任务栏/Dock 空间
-- **多显示器支持**: 自动识别鼠标所在的显示器进行截图
-- **高 DPI/Retina 支持**: 完美支持高分辨率显示器
+- **窗口截图**: 悬停在窗口上自动高亮，点击可截取整个窗口
+- **标注工具**:
+  - 移动工具（默认）：拖拽已绘制的图形
+  - 画笔：自由涂鸦
+  - 矩形：绘制矩形框
+  - 圆形：绘制椭圆框
+  - 箭头：绘制箭头
+  - 直线：绘制直线
+  - 橡皮擦：擦除标注
+  - 文字：在截图上添加文字
+- **颜色选择**: 红色 / 绿色 / 蓝色
+- **粗细选择**: 细 / 中 / 粗
+- **字号选择**: 小 / 中 / 大（文字工具）
+- **撤回功能**: 撤销上一步操作
+- **双击保存**: 在截图区域双击左键快速保存
+- **自动保存**: 截图自动保存到下载目录
+- **剪贴板集成**: 文件路径自动复制到剪贴板
+- **系统托盘**: 最小化到托盘，不占用任务栏
+- **多显示器支持**: 自动识别鼠标所在显示器
+- **高 DPI 支持**: 完美支持 Retina/高分辨率屏
 
-## 系统要求
-
-- **macOS**: macOS 10.15 (Catalina) 或更高版本
-- **Windows**: Windows 10/11
-- **Python**: 3.8 或更高版本
+---
 
 ## 安装
 
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/your-username/snapshot_helper.git
+git clone <仓库地址>
 cd snapshot_helper
 ```
 
 ### 2. 创建虚拟环境
 
+**macOS:**
 ```bash
-python -m venv venv
-```
-
-### 3. 激活虚拟环境并安装依赖
-
-**macOS / Linux:**
-```bash
+python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
 
 **Windows:**
 ```bash
+python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
+### 3. macOS 额外设置
+
+首次运行需要授予权限：
+
+1. **辅助功能权限**（热键监听）:
+   - 系统设置 → 隐私与安全性 → 辅助功能
+   - 添加 Terminal.app 或你的终端应用
+
+2. **屏幕录制权限**（截图功能）:
+   - 系统设置 → 隐私与安全性 → 屏幕录制
+   - 添加 Terminal.app 或你的终端应用
+
+---
 
 ## 使用方法
 
 ### 启动程序
 
 **macOS:**
+
 ```bash
-source venv/bin/activate && python snap_tool.py
+source venv/bin/activate
+python3 snap_tool.py
 ```
+
+或双击运行 `run_mac.command`
 
 **Windows:**
-```bash
-run.bat
-```
 
-程序将在后台启动，并在系统托盘显示图标。
+双击运行 `run.bat`
+
+程序启动后会最小化到系统托盘。
+
+---
 
 ### 截图操作
 
-1. **触发截图**:
-   - macOS: 按 `Ctrl+A`
-   - Windows: 按 `Shift+Alt+B`
-2. **框选区域**: 鼠标拖动选择截图区域
-3. **编辑标注**（可选）:
-   - 选择工具（画笔/矩形/圆形/箭头/橡皮擦）
-   - 选择颜色和笔触粗细
-   - 在截图上进行标注
-   - 使用橡皮擦工具擦除不需要的标注
-   - 点击撤回按钮可撤销上一步操作
-4. **保存截图**:
-   - 方式 1: 点击工具栏中的 `✓` 确定按钮
-   - 方式 2: 在截图区域双击鼠标左键（快捷方式）
-5. **取消截图**: 点击 `✕` 取消按钮或按 `ESC` 键
+#### 1. 触发截图
+
+| 系统 | 热键 |
+|------|------|
+| macOS | `Ctrl + A` |
+| Windows | `Shift + Alt + B` |
+
+或右键点击托盘图标 → "截取屏幕"
+
+#### 2. 选择截图区域
+
+- **框选区域**: 鼠标拖动框选
+- **窗口截图**: 将鼠标移到窗口上，会自动高亮显示，点击即可截取该窗口
+
+#### 3. 编辑标注
+
+截图后会进入编辑模式，底部工具栏提供以下工具：
+
+| 工具 | 说明 |
+|------|------|
+| 移动 | 拖拽已绘制的图形（任何工具下都可用） |
+| 画笔 | 自由涂鸦 |
+| 矩形 | 绘制矩形框 |
+| 圆形 | 绘制椭圆框 |
+| 箭头 | 绘制箭头 |
+| 直线 | 绘制直线 |
+| 橡皮擦 | 擦除标注 |
+| 文字 | 添加文字标注 |
+
+点击工具按钮后，如果该工具有参数（颜色/粗细/字号），会弹出参数面板：
+
+- **颜色面板**: 红色 / 绿色 / 蓝色
+- **粗细面板**: 细 / 中 / 粗
+- **字号面板**: 小 / 中 / 大（仅文字工具）
+
+#### 4. 撤回操作
+
+点击工具栏的 **↩ 撤销** 按钮可撤销上一步操作。
+
+#### 5. 保存截图
+
+保存方式（三选一）:
+
+1. 点击工具栏 **✓** 按钮
+2. 在截图区域 **双击左键**（快捷方式）
+3. 按 `Enter` 键
+
+取消截图: 按 `ESC` 键 或 点击 **✕** 按钮
+
+---
 
 ### 系统托盘操作
 
-右键点击系统托盘图标可以:
-- 手动触发截图
-- 退出程序
+右键点击托盘图标可以：
 
-## 开机自启动
+- **截取屏幕** - 手动触发截图
+- **退出** - 关闭程序
 
-### macOS
+---
+
+### 开机自启动
+
+#### macOS
 
 运行安装脚本：
 
@@ -110,31 +164,63 @@ chmod +x install_launchagent.sh
 ./install_launchagent.sh
 ```
 
-卸载开机自启动：
+卸载：
+
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.snaptool.plist
 rm ~/Library/LaunchAgents/com.snaptool.plist
 ```
 
-### Windows
+#### Windows
 
-运行 PowerShell 脚本来创建开机启动快捷方式:
+运行 PowerShell 脚本：
 
 ```powershell
 .\create_startup.ps1
 ```
 
-## macOS 权限设置
+---
 
-首次运行时，macOS 可能需要授予以下权限：
+## 截图保存
 
-1. **辅助功能权限**（用于全局热键监听）:
-   - 打开 **系统设置** → **隐私与安全性** → **辅助功能**
-   - 添加 Terminal.app（或你使用的终端应用）
+截图自动保存到系统下载目录：
 
-2. **屏幕录制权限**（用于截取屏幕）:
-   - 打开 **系统设置** → **隐私与安全性** → **屏幕录制**
-   - 添加 Terminal.app（或你使用的终端应用）
+| 系统 | 路径 |
+|------|------|
+| macOS | `~/Downloads/screenshots/` |
+| Windows | `C:\Users\<用户名>\Downloads\screenshots\` |
+
+文件名格式: `screenshot_YYYYMMDD_HHMMSS.png`
+
+截图路径会自动复制到剪贴板。
+
+---
+
+## 故障排查
+
+### 热键不响应
+
+- 确保程序正在运行（检查系统托盘图标）
+- macOS: 检查是否已授予辅助功能权限
+
+### 截图黑屏
+
+- macOS: 检查是否已授予屏幕录制权限
+
+### 多显示器问题
+
+运行诊断工具检查显示器配置：
+
+```bash
+# macOS
+source venv/bin/activate
+python3 diag.py
+
+# Windows
+venv\Scripts\python.exe diag.py
+```
+
+---
 
 ## 项目结构
 
@@ -145,58 +231,34 @@ snapshot_helper/
 ├── README.md                 # 项目说明
 ├── run.bat                   # Windows 启动脚本
 ├── run_mac.command           # macOS 启动脚本
-├── com.snaptool.plist        # macOS LaunchAgent 配置
 ├── install_launchagent.sh    # macOS 开机自启动安装脚本
 ├── create_startup.ps1        # Windows 开机启动配置脚本
+├── com.snaptool.plist        # macOS LaunchAgent 配置
 └── diag.py                   # 显示器诊断工具
 ```
 
+---
+
 ## 依赖项
 
-- **PyQt6** (>= 6.0.0): GUI 框架
-- **pynput** (>= 1.7.0): 全局热键监听
-- **mss** (>= 9.0.0): 跨平台截屏库（Windows fallback）
-- **pyobjc-framework-Quartz** (macOS): 原生截屏 API
-- **pyobjc-framework-Cocoa** (macOS): 应用控制
+- **PyQt6**: GUI 框架
+- **pynput**: 全局热键监听（Windows）
+- **mss**: 跨平台截屏库
+- **Pillow**: 图像处理
 
-## 截图保存位置
+---
 
-截图默认保存在系统临时目录:
+## 日志
 
-- **macOS**: `/tmp/screenshots/`
-- **Windows**: `%TEMP%\screenshots\`
+程序运行日志保存在：
 
-文件名格式: `screenshot_YYYYMMDD_HHMMSS.png`
+| 系统 | 路径 |
+|------|------|
+| macOS | `/tmp/snaptool_logs/snaptool.log` |
+| Windows | `%TEMP%\snaptool_logs\snaptool.log` |
 
-## 故障排查
+如果遇到问题，可查看日志文件排查。
 
-### 常见问题
-
-1. **热键不响应**
-   - 确保程序正在运行（检查系统托盘图标）
-   - macOS: 检查是否已授予辅助功能权限
-
-2. **截图黑屏或无法截取**
-   - macOS: 检查是否已授予屏幕录制权限
-
-3. **截图模糊**
-   - 程序已启用高 DPI/Retina 支持
-   - 如果仍有问题，尝试重启程序
-
-4. **多显示器问题**
-   - 运行 `python diag.py` 检查显示器配置
-
-### 诊断显示器信息
-
-```bash
-source venv/bin/activate  # macOS
-python diag.py
-```
-
-## 许可证
+---
 
 MIT License
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！
